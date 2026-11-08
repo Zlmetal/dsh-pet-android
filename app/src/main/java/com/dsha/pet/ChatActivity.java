@@ -35,6 +35,8 @@ public class ChatActivity extends Activity {
     private static final String K_LAST = "last_session";
     /** 一次拉多少条 assistant 记录（体积不小，别贪）。 */
     private static final int PAGE_MESSAGES = 6;
+    /** 提示行的 tag，真消息进来时要清掉。 */
+    private static final String TAG_NOTICE = "notice";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -582,6 +584,7 @@ public class ChatActivity extends Activity {
     }
 
     private void addMsg(DshApi.Msg m) {
+        removeNotices();
         feed.addView(msgView(m));
         scrollBottom();
     }
@@ -617,7 +620,7 @@ public class ChatActivity extends Activity {
         rowLine.setGravity(mine ? Gravity.END : Gravity.START);
 
         TextView tv = new TextView(this);
-        tv.setText(m.text);
+        tv.setText(cleanText(m.text));
         tv.setTextSize(15);
         tv.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
         tv.setTextIsSelectable(true);
@@ -780,11 +783,31 @@ public class ChatActivity extends Activity {
         tv.setTextColor(0xFF9A97B8);
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dp(8), dp(10), dp(8), dp(10));
+        tv.setTag(TAG_NOTICE);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(10);
         feed.addView(tv, lp);
         scrollBottom();
+    }
+
+    /** 有真消息进来时把「这个会话还是空的」「正在拉取」这类提示清掉，别留着占位。 */
+    private void removeNotices() {
+        for (int i = feed.getChildCount() - 1; i >= 0; i--) {
+            View v = feed.getChildAt(i);
+            if (v != null && TAG_NOTICE.equals(String.valueOf(v.getTag()))) feed.removeViewAt(i);
+        }
+    }
+
+    /**
+     * 去掉 `[表情: xxx]` 这种只在支持表情包的前端才有意义的标记——
+     * App 里没有表情包通道，原样留着就是一行机器话。
+     */
+    private static String cleanText(String s) {
+        if (s == null) return null;
+        if (s.indexOf("[表情") < 0) return s;
+        String r = s.replaceAll("\\s*\\[表情[^\\]]*\\]", "").trim();
+        return r.isEmpty() ? s : r;
     }
 
     private void clearFeed() {
