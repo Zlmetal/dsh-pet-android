@@ -26,8 +26,6 @@ import android.widget.TextView;
 public class MainActivity extends Activity {
     private TextView status;
     private TextView debug;
-    private TextView dshaValue;
-    private TextView dshaBtn;
     private android.widget.Switch linkSwitch;
     private TextView epValue;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -127,12 +125,6 @@ public class MainActivity extends Activity {
         rowDsh.addView(debug);
         cards.addView(rowDsh, matchTop(dp(10)));
 
-        LinearLayout rowDsha = row();
-        rowDsha.addView(label("DSHA 客户端"), weightLp(1f));
-        dshaValue = value("检查中…", 0xFF9A97B8);
-        rowDsha.addView(dshaValue);
-        cards.addView(rowDsha, matchTop(dp(10)));
-
         LinearLayout rowEp = row();
         rowEp.addView(label("DSH 端点"), weightLp(1f));
         epValue = value("查找中…", 0xFF9A97B8);
@@ -182,11 +174,6 @@ public class MainActivity extends Activity {
         pair.addView(perm, rightLp);
         root.addView(pair, matchTop(dp(12)));
 
-        dshaBtn = pill("去 GitHub 获取 DSHA", 0xFF7B6BB5, false);
-        dshaBtn.setOnClickListener(v -> openDshaDownload());
-        dshaBtn.setVisibility(View.GONE);
-        root.addView(dshaBtn, matchTop(dp(12)));
-
         LinearLayout epBtns = new LinearLayout(this);
         epBtns.setOrientation(LinearLayout.HORIZONTAL);
         TextView redetect = pill("重新检测", 0xFF7B6BB5, false);
@@ -226,6 +213,10 @@ public class MainActivity extends Activity {
         test.setOnClickListener(v -> testDsh());
         root.addView(test, matchTop(dp(12)));
 
+        TextView chat = pill("跟大肥鱼聊天", 0xFFFFFFFF, true);
+        chat.setOnClickListener(v -> startActivity(new Intent(this, ChatActivity.class)));
+        root.addView(chat, matchTop(dp(12)));
+
         // ---------- 玩法说明 ----------
         LinearLayout tips = card();
         tips.setBackground(round(0xFFF3F0FF, 22));
@@ -235,17 +226,8 @@ public class MainActivity extends Activity {
         tips.addView(sectionTitle("怎么玩"));
         tips.addView(tip("单击 —— Q 弹一下，好感 +1"));
         tips.addView(tip("拖动甩出去 —— 会在屏幕上弹来弹去"));
-        tips.addView(tip("双击 —— 打开 DSHA"));
-        tips.addView(tip("长按 —— 呼出菜单（余额 / 碎碎念 / 大小 / 动作）"));
-
-        TextView donate = new TextView(this);
-        donate.setText("赞赏作者 ♥");
-        donate.setTextSize(12);
-        donate.setTextColor(0xFF9C8CD8);
-        donate.setGravity(Gravity.CENTER);
-        donate.setPadding(dp(10), dp(12), dp(10), dp(12));
-        donate.setOnClickListener(v -> showDonate());
-        root.addView(donate, matchTop(dp(14)));
+        tips.addView(tip("双击 —— 跟大肥鱼聊天"));
+        tips.addView(tip("长按 —— 呼出菜单（对话 / 余额 / 碎碎念 / 大小 / 动作）"));
 
         TextView footer = new TextView(this);
         footer.setText("v" + version() + " · 常驻不耗电 · 不依赖 ADB / Shizuku");
@@ -269,46 +251,6 @@ public class MainActivity extends Activity {
         testDsh();
     }
 
-    private void showDonate() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER_HORIZONTAL);
-        box.setPadding(dp(18), dp(16), dp(18), dp(10));
-
-        TextView t1 = new TextView(this);
-        t1.setText("请我喝杯奶茶 ☕");
-        t1.setTextSize(17);
-        t1.setTextColor(0xFF4A4560);
-        t1.setGravity(Gravity.CENTER);
-        box.addView(t1);
-
-        ImageView iv = new ImageView(this);
-        try {
-            java.io.InputStream in = getAssets().open("donate.png");
-            iv.setImageDrawable(android.graphics.drawable.Drawable.createFromStream(in, "donate"));
-            in.close();
-        } catch (Exception ignored) {
-        }
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(200), dp(200));
-        ilp.topMargin = dp(12);
-        box.addView(iv, ilp);
-
-        TextView t2 = new TextView(this);
-        t2.setText("微信扫码 · 感谢大佬支持 ♥");
-        t2.setTextSize(12);
-        t2.setTextColor(0xFF8D89AC);
-        t2.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams t2lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        t2lp.topMargin = dp(10);
-        box.addView(t2, t2lp);
-
-        new AlertDialog.Builder(this)
-                .setView(box)
-                .setPositiveButton("好的 ♥", null)
-                .show();
-    }
-
     @Override
     protected void onResume() {
         super.onResume();
@@ -316,13 +258,6 @@ public class MainActivity extends Activity {
         boolean can = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this);
         status.setText(can ? "已授予" : "未授予");
         status.setTextColor(can ? 0xFF35B37E : 0xFFF0973B);
-
-        boolean dsha = hasDsha();
-        if (dshaValue != null) {
-            dshaValue.setText(dsha ? "已安装" : "未安装");
-            dshaValue.setTextColor(dsha ? 0xFF35B37E : 0xFFF0973B);
-        }
-        if (dshaBtn != null) dshaBtn.setVisibility(dsha ? View.GONE : View.VISIBLE);
     }
 
     @Override
@@ -454,23 +389,6 @@ public class MainActivity extends Activity {
         if (debug == null) return;
         debug.setText(s);
         debug.setTextColor(s != null && s.startsWith("OK") ? 0xFF35B37E : 0xFFF0973B);
-    }
-
-    private boolean hasDsha() {
-        try {
-            getPackageManager().getPackageInfo("dsh.android.client", 0);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private void openDshaDownload() {
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://github.com/DSH-APP/DSHA")));
-        } catch (Exception ignored) {
-        }
     }
 
     private String version() {

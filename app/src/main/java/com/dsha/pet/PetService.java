@@ -455,7 +455,7 @@ public class PetService extends Service {
                                 && Math.abs(e.getRawY() - lastTapY) < 80 * d;
                         if (dbl) {
                             lastTapUp = 0;
-                            openDsha();
+                            openChat();
                         } else {
                             lastTapUp = now;
                             lastTapX = e.getRawX();
@@ -891,14 +891,19 @@ public class PetService extends Service {
     }
 
     private void showMenu() {
-        final boolean dsha = hasDsha() && linkMode && !pluginMissing;
+        // 联动类功能只要 DSH 连得上就能用；打开 DSHA 是额外项（装了才显示）
+        final boolean online = linkMode && !pluginMissing;
+        final boolean dsha = online && hasDsha();
         java.util.ArrayList<String> ls = new java.util.ArrayList<>();
         final java.util.ArrayList<Integer> ids = new java.util.ArrayList<>();
-        if (dsha) {
-            ls.add("打开 DSH"); ids.add(0);
+        // 对话只依赖 dsh-pet 插件本身，连不连得上都让用户点进去看错误
+        ls.add("对话"); ids.add(3);
+        if (online) {
             ls.add("查看余额"); ids.add(1);
             ls.add("碎碎念"); ids.add(2);
-            ls.add("对话"); ids.add(3);
+        }
+        if (dsha) {
+            ls.add("打开 DSH"); ids.add(0);
         }
         ls.add("动作 ▸"); ids.add(4);
         ls.add("大小 ▸"); ids.add(5);
@@ -906,8 +911,8 @@ public class PetService extends Service {
         ls.add("回到初始位置"); ids.add(7);
         ls.add("好感度"); ids.add(8);
         ls.add("退出桌宠"); ids.add(9);
-        if (!dsha) {
-            ls.add("获取 DSHA ↓"); ids.add(10);
+        if (!online) {
+            ls.add("设置 DSH 地址与密码"); ids.add(11);
         }
         final String[] labels = ls.toArray(new String[0]);
         showPage("大肥鱼 · 好感 Lv." + heartLevel(), labels,
@@ -929,7 +934,7 @@ public class PetService extends Service {
                                         if (t != null) {
                                             showBubble("余额 ¥" + t, 6000);
                                         } else if (!reachable) {
-                                            showBubble("DSH 没连上，先打开 DSHA 吧🥺", 4000);
+                                            showBubble("DSH 没连上，检查一下地址和密码吧🥺", 4000);
                                         } else {
                                             showBubble("无法查询「" + modelLabel(provider) + "」的余额" + pickSadEmoji(), 5200);
                                         }
@@ -942,8 +947,7 @@ public class PetService extends Service {
                                 break;
                             case 3:
                                 hideMenu();
-                                showBubble("去 DSH 里跟我说话吧～", 2200);
-                                openDsha();
+                                openChat();
                                 break;
                             case 4:
                                 showActions();
@@ -976,11 +980,26 @@ public class PetService extends Service {
                                 hideMenu();
                                 openDshaDownload();
                                 break;
+                            case 11:
+                                hideMenu();
+                                openSettings();
+                                break;
                             default:
                                 break;
                         }
                     }
                 });
+    }
+
+    /** 跳主界面去填地址 / 密码（菜单里没连上时的入口）。 */
+    private void openSettings() {
+        try {
+            Intent i = new Intent(this, MainActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            showBubble("主界面打不开：" + e.getClass().getSimpleName(), 3200);
+        }
     }
 
     /** 没装 DSHA 时，引导去 GitHub 下载。 */
@@ -1445,6 +1464,17 @@ public class PetService extends Service {
         });
     }
 
+    /** 打开自带的对话界面（双击 / 菜单「对话」都走这里）。 */
+    private void openChat() {
+        try {
+            Intent i = new Intent(this, ChatActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            showBubble("对话界面打不开：" + e.getClass().getSimpleName(), 3200);
+        }
+    }
+
     private void openDsha() {
         String err = null;
         try {
@@ -1592,7 +1622,17 @@ public class PetService extends Service {
     private String base() {
         DshEndpoint e = ep;
         if (e != null) return e.base();
-        DshEndpoint c = DshEndpoint.cached(this);
+        return endpointBase(this);
+    }
+
+    /**
+     * 给别的界面（ChatActivity）用的基址：服务活着就用它正在用的端点，
+     * 服务没起来就退回上次缓存的端点，最后兜底本机默认端口。
+     */
+    public static String endpointBase(Context ctx) {
+        PetService p = inst;
+        if (p != null && p.ep != null) return p.ep.base();
+        DshEndpoint c = ctx == null ? null : DshEndpoint.cached(ctx);
         if (c != null) return c.base();
         return "http://127.0.0.1:" + DshEndpoint.DEFAULT_PORT + DshEndpoint.PATH;
     }
@@ -1772,7 +1812,7 @@ public class PetService extends Service {
         b.setContentTitle("大肥鱼桌宠运行中 · 好感 Lv." + heartLevel())
                 .setContentText(pausedLink
                         ? "联动已暂停 · 桌宠仍在，点「继续联动」恢复"
-                        : "单击Q弹 · 双击开DSH · 甩出去会飞 · 飞行中按一下接住")
+                        : "单击Q弹 · 双击聊天 · 甩出去会飞 · 飞行中按一下接住")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(open)
                 .setOngoing(true);
