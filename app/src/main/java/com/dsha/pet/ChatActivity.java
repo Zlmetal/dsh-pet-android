@@ -584,8 +584,10 @@ public class ChatActivity extends Activity {
     }
 
     private void addMsg(DshApi.Msg m) {
+        View v = msgView(m);
+        if (v == null) return;
         removeNotices();
-        feed.addView(msgView(m));
+        feed.addView(v);
         scrollBottom();
     }
 
@@ -615,12 +617,14 @@ public class ChatActivity extends Activity {
         }
 
         boolean mine = "user".equals(m.role);
+        String body = cleanText(m.text);
+        if (body == null) return null;
         LinearLayout rowLine = new LinearLayout(this);
         rowLine.setOrientation(LinearLayout.HORIZONTAL);
         rowLine.setGravity(mine ? Gravity.END : Gravity.START);
 
         TextView tv = new TextView(this);
-        tv.setText(cleanText(m.text));
+        tv.setText(body);
         tv.setTextSize(15);
         tv.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
         tv.setTextIsSelectable(true);
@@ -807,7 +811,8 @@ public class ChatActivity extends Activity {
         if (s == null) return null;
         if (s.indexOf("[表情") < 0) return s;
         String r = s.replaceAll("\\s*\\[表情[^\\]]*\\]", "").trim();
-        return r.isEmpty() ? s : r;
+        // 整条就只有表情标记（本机没有表情包通道），返回 null 让调用方跳过这条
+        return r.isEmpty() ? null : r;
     }
 
     private void clearFeed() {
