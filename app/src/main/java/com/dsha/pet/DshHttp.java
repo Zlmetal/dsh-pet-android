@@ -402,15 +402,17 @@ public final class DshHttp {
             if (bb != null) os.write(bb);
             os.flush();
 
-            String raw = readAll(s);
-            int split = raw.indexOf("\r\n\r\n");
+            // 全程按字节走：chunk 的长度是**字节**数，先解成字符串再切会把中文算错
+            byte[] raw = readAllBytes(s);
+            int split = indexOfCrlf2(raw);
             if (split < 0) return null;
-            String head = raw.substring(0, split);
-            String payload = raw.substring(split + 4);
+            String head = new String(raw, 0, split, "ISO-8859-1");
+            byte[] payload = new byte[raw.length - split - 4];
+            System.arraycopy(raw, split + 4, payload, 0, payload.length);
             int status = parseStatus(head);
             String lowHead = head.toLowerCase(Locale.US);
-            if (lowHead.contains("transfer-encoding: chunked")) payload = dechunk(payload);
-            return new Resp(status, head, payload);
+            if (lowHead.contains("transfer-encoding: chunked")) payload = dechunkBytes(payload);
+            return new Resp(status, head, new String(payload, "UTF-8"));
         } finally {
             try {
                 s.close();
@@ -502,39 +504,57 @@ public final class DshHttp {
         }
     }
 
-    private static String readAll(Socket s) throws Exception {
+    /**
+     * 读到 EOF 为止。**必须返回原始字节**——chunk 分段长度是按字节算的，
+     * 先转成 String 再按字符切会把每个中文算成 3 份，直接截断 JSON。
+     * （这就是 1.0.0.4 里「Unterminated object at character 32768」的根因）
+     */
+    private static byte[] readAllBytes(Socket s) throws Exception {
         InputStream in = s.getInputStream();
-        ByteArrayOutputStream bos = new ByteArrayOutputStream(4096);
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(8192);
         byte[] buf = new byte[8192];
         int n;
         int total = 0;
         while ((n = in.read(buf)) > 0) {
             bos.write(buf, 0, n);
             total += n;
-            if (total > (1 << 20)) break;
+            if (total > (4 << 20)) break;
         }
-        return bos.toString("UTF-8");
+        return bos.toByteArray();
     }
 
-    static String dechunk(String s) {
-        StringBuilder out = new StringBuilder();
+    private static int indexOfCrlf2(byte[] b) {
+        for (int i = 0; i + 3 < b.length; i++) {
+            if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') return i;
+        }
+        return -1;
+    }
+
+    /** 按字节解 chunked。长度后面可能跟 `;ext=...`，要按分号截掉。 */
+    static byte[] dechunkBytes(byte[] b) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(b.length);
         int i = 0;
-        while (i < s.length()) {
-            int e = s.indexOf("\r\n", i);
-            if (e < 0) break;
+        while (i < b.length) {
+            int e = i;
+            while (e < b.length && !(b[e] == '\r' && e + 1 < b.length && b[e + 1] == '\n')) e++;
+            if (e >= b.length) break;
+            String line = new String(b, i, e - i, "ISO-8859-1").trim();
+            int semi = line.indexOf(';');
+            if (semi >= 0) line = line.substring(0, semi).trim();
             int size;
             try {
-                size = Integer.parseInt(s.substring(i, e).trim(), 16);
+                size = Integer.parseInt(line, 16);
             } catch (Exception x) {
                 break;
             }
             if (size == 0) break;
             int from = e + 2;
-            int to = Math.min(s.length(), from + size);
-            out.append(s, from, to);
-            i = to + 2;
+            int to = Math.min(b.length, from + size);
+            if (to <= from) break;
+            out.write(b, from, to - from);
+            i = to + 2; // 跳过块尾的 CRLF
         }
-        return out.toString();
+        return out.toByteArray();
     }
 
     private static String enc(String v) {

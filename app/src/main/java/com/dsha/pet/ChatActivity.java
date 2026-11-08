@@ -20,13 +20,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * App 里的聊天：左边（右侧抽屉）会话列表 + 聊天流，跟网页用的是同一份会话。
+ * App 里的聊天：左侧会话抽屉 + 聊天流，跟网页用的是同一份会话。
  *
  * 数据来源是 DSH 的 /api（见 DshApi），不是 dsh-pet 插件那个 /chat——
  * 那个是插件自己的独立身份（sessionId 写死 "dsh-pet"），看不到网页里聊过的东西。
  *
  * 交互：
- *   顶栏「≡」开合右侧会话抽屉；点会话加载前后各一页历史；发消息后
+ *   顶栏「≡」开合左侧会话抽屉；点会话加载前后各一页历史；发消息后
  *   用 session/wait 阻塞到这一轮跑完，回复直接拿到，不用轮询。
  */
 public class ChatActivity extends Activity {
@@ -39,6 +39,8 @@ public class ChatActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private FrameLayout root;
+    private View chatView;
+    private FrameLayout.LayoutParams chatParams;
     private LinearLayout sidebar;
     private LinearLayout sessionList;
     private LinearLayout feed;
@@ -75,20 +77,25 @@ public class ChatActivity extends Activity {
         root.setBackground(bg);
         setContentView(root);
 
-        root.addView(buildChat(), new FrameLayout.LayoutParams(
+        chatView = buildChat();
+        root.addView(chatView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         sidebar = buildSidebar();
         FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
                 dp(272), ViewGroup.LayoutParams.MATCH_PARENT);
-        slp.gravity = Gravity.END;
+        slp.gravity = Gravity.START;
         root.addView(sidebar, slp);
 
-        // 手机上默认把抽屉收起来，平板（够宽）才一直摊开
-        if (isNarrow()) {
-            sidebarOpen = false;
-            applySidebar();
-        }
+        // 抽屉盖上时给聊天列留出宽度；摊开时只留一条缝，别把内容全遮住
+        chatParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        chatParams.leftMargin = 0;
+        chatView.setLayoutParams(chatParams);
+
+        // 手机上默认收起，平板（够宽）默认摊开并排显示
+        sidebarOpen = !isNarrow();
+        applySidebar();
 
         String last = getSharedPreferences(PREFS, MODE_PRIVATE).getString(K_LAST, null);
         if (last != null) currentId = last;
@@ -238,11 +245,19 @@ public class ChatActivity extends Activity {
         applySidebar();
     }
 
+    /**
+     * 抽屉默认贴左边，摊开时聊天列整体右移（跟网页一样是并排，不是盖在上面）。
+     * 窄屏上抽屉是抽屉（盖上来），宽屏上就是并排的两栏。
+     */
     private void applySidebar() {
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) sidebar.getLayoutParams();
         lp.width = sidebarOpen ? dp(272) : 0;
         sidebar.setLayoutParams(lp);
         sidebar.setVisibility(sidebarOpen ? View.VISIBLE : View.GONE);
+        if (chatParams != null) {
+            chatParams.leftMargin = (sidebarOpen && !isNarrow()) ? dp(272) : 0;
+            chatView.setLayoutParams(chatParams);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -391,7 +406,7 @@ public class ChatActivity extends Activity {
         if (!rows.isEmpty()) openSession(rows.get(0));
         else {
             clearFeed();
-            addNotice("还没有会话，点「新」开一个，或者右上角「≡」换一个。");
+            addNotice("还没有会话，点「新」开一个，或者左上角「≡」换一个。");
         }
     }
 
@@ -672,7 +687,7 @@ public class ChatActivity extends Activity {
     private void send() {
         if (sending) return;
         if (currentId == null) {
-            addNotice("先选一个会话（右上角「≡」），或者点「新」。");
+            addNotice("先选一个会话（左上角「≡」），或者点「新」。");
             return;
         }
         final String text = input.getText().toString().trim();
