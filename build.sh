@@ -52,7 +52,7 @@ cd build
 cp base.apk unsigned.apk
 (cd dex && zip -0 -u ../unsigned.apk classes.dex >/dev/null)
 "$ZIPALIGN" -f 4 unsigned.apk aligned.apk
-"$APKSIGNER" sign --ks "../$KS" --ks-pass pass:android --key-pass pass:android \
+"$APKSIGNER" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
   --out pet.apk aligned.apk
 "$APKSIGNER" verify pet.apk
 ls -la pet.apk
