@@ -538,7 +538,7 @@ public final class DshHttp {
             int e = i;
             while (e < b.length && !(b[e] == '\r' && e + 1 < b.length && b[e + 1] == '\n')) e++;
             if (e >= b.length) break;
-            String line = new String(b, i, e - i, "ISO-8859-1").trim();
+            String line = new String(b, i, e - i, java.nio.charset.StandardCharsets.ISO_8859_1).trim();
             int semi = line.indexOf(';');
             if (semi >= 0) line = line.substring(0, semi).trim();
             int size;
