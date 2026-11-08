@@ -9,7 +9,11 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
@@ -21,15 +25,25 @@ import javax.net.ssl.SSLSocketFactory;
  * 原版只有裸 Socket + http://，连本机 127.0.0.1 够用，但连经过 dsh-access-gate
  * 反代的远程 DSH 就不行：没有 https、不带 Cookie、遇到 302 跳登录页直接判失败。
  *
- * 这里把三件事收拢到一处：
+ * 远程部署其实是<b>两层</b>认证：
+ *   1) dsh-access-gate 的密码 cookie（dsh_gate_token）——拿不到就被 302 踢去登录页；
+ *   2) DSH 自己的签名 cookie（dsh-auth-&lt;hash&gt;）——只管 /api，缺了就是纯文本 401。
+ * 第 2 层的 cookie 只能从 `GET /?token=...` 的 303 响应里拿，而那个 token 只出现在
+ * 密码登录成功的 Location 里。所以「补 dsh-auth」= 重新走一次密码登录抓 token 再交换，
+ * 这一步藏在 ensureDshAuth() 里，调用方不用管。
+ *
+ * 这里把四件事收拢到一处：
  *   1. http / https 统一出口（TLS 用系统信任库，并做 HTTPS 主机名校验）；
- *   2. 自动携带 dsh_gate_token，302 到登录页时用保存的密码自动重登再重试一次；
- *   3. 返回带状态码的响应，让调用方自己决定怎么处理非 200。
+ *   2. 一个多 cookie 的 jar，两层 cookie 都自动携带；
+ *   3. 302 到登录页时用保存的密码自动重登再重试一次；
+ *   4. /api 401 时自动补 dsh-auth cookie 再重试一次。
  */
 public final class DshHttp {
     /** dsh-access-gate 的登录路径与 cookie 名（见 access-gate 的 lib/index.js）。 */
     public static final String LOGIN_PATH = "/-/auth/login";
     public static final String COOKIE_NAME = "dsh_gate_token";
+    /** DSH 自己签发的会话 cookie 前缀（后面跟着 authority 的 hash）。 */
+    public static final String DSH_COOKIE_PREFIX = "dsh-auth-";
 
     private static final String PREFS = "dsh_pet_auth";
     private static final String K_PASS = "gate_password";
@@ -37,12 +51,16 @@ public final class DshHttp {
     private static final String DEFAULT_CT = "application/json; charset=utf-8";
     private static final String FORM_CT = "application/x-www-form-urlencoded; charset=utf-8";
 
-    /** 当前 access-gate 会话 token。null = 还没登录过。 */
-    private static volatile String cookie = null;
+    /** 两层 cookie 都放这儿，请求时整串带上。 */
+    private static final Map<String, String> jar = new LinkedHashMap<>();
+    /** 密码登录时从 Location 里捞到的 launch token，用来换 dsh-auth cookie。 */
+    private static volatile String launchToken = null;
     /** 最近一次认证失败的原因，供界面显示。 */
     public static volatile String lastAuthError = null;
     /** 上次登录失败的时间，避免每次轮询都去撞登录页。 */
     private static volatile long lastLoginFailAt = 0;
+    /** 防止 ensureDshAuth 在极端情况下反复递归登录。 */
+    private static final ThreadLocal<Boolean> authBusy = new ThreadLocal<>();
 
     private static volatile Context app = null;
 
@@ -84,13 +102,82 @@ public final class DshHttp {
 
     /** 丢掉当前会话，下次请求会重新登录。 */
     public static void clearAuth() {
-        cookie = null;
+        synchronized (jar) {
+            jar.clear();
+        }
+        launchToken = null;
         lastAuthError = null;
         lastLoginFailAt = 0;
     }
 
+    /** 只为「已连上过 DSH」判断，两层都在才算有会话。 */
     public static boolean hasSession() {
-        return cookie != null;
+        return hasGateCookie() && hasDshAuth();
+    }
+
+    private static boolean hasGateCookie() {
+        synchronized (jar) {
+            return jar.containsKey(COOKIE_NAME);
+        }
+    }
+
+    /** 是否已经拿到 DSH 自己的签名 cookie（/api 要用）。 */
+    public static boolean hasDshAuth() {
+        synchronized (jar) {
+            for (String k : jar.keySet()) {
+                if (k.startsWith(DSH_COOKIE_PREFIX)) return true;
+            }
+            return false;
+        }
+    }
+
+    /** 当前完整的 Cookie 请求头值；没 cookie 返回 null。 */
+    public static String cookieHeader() {
+        synchronized (jar) {
+            if (jar.isEmpty()) return null;
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : jar.entrySet()) {
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(e.getKey()).append('=').append(e.getValue());
+            }
+            return sb.toString();
+        }
+    }
+
+    /** 把 Set-Cookie 收进 jar（支持一次返回多条、支持 Max-Age=0 删除）。 */
+    private static void absorbCookies(Resp r) {
+        if (r == null) return;
+        for (String sc : r.headers("set-cookie")) {
+            int semi = sc.indexOf(';');
+            String pair = semi < 0 ? sc : sc.substring(0, semi);
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String k = pair.substring(0, eq).trim();
+            String v = pair.substring(eq + 1).trim();
+            if (k.isEmpty()) continue;
+            String low = sc.toLowerCase(Locale.US);
+            boolean del = low.contains("max-age=0") || v.isEmpty();
+            synchronized (jar) {
+                if (del) {
+                    jar.remove(k);
+                } else {
+                    jar.put(k, v);
+                }
+            }
+        }
+        // 从 302 的 Location 里捞 launch token：/?token=xxx
+        String t = tokenOf(r.header("location"));
+        if (t != null) launchToken = t;
+    }
+
+    private static String tokenOf(String loc) {
+        if (loc == null || loc.isEmpty()) return null;
+        int i = loc.indexOf("token=");
+        if (i < 0) return null;
+        int from = i + 6;
+        int to = loc.indexOf('&', from);
+        String v = to < 0 ? loc.substring(from) : loc.substring(from, to);
+        return v.isEmpty() ? null : v;
     }
 
     // ------------------------------------------------------------------
@@ -118,10 +205,22 @@ public final class DshHttp {
             }
             return null;
         }
+
+        /** 取同名响应头的全部取值（Set-Cookie 会不止一条）。 */
+        public List<String> headers(String name) {
+            List<String> out = new ArrayList<>();
+            if (head == null) return out;
+            String want = name.toLowerCase(Locale.US) + ":";
+            for (String line : head.split("\r\n")) {
+                String l = line.toLowerCase(Locale.US);
+                if (l.startsWith(want)) out.add(line.substring(want.length()).trim());
+            }
+            return out;
+        }
     }
 
     /**
-     * 发一次请求。遇到 access-gate 的 302 登录跳转会尝试自动登录并重试一次。
+     * 发一次请求。两层认证都在这里兜：gate 302 会重登，/api 401 会补 dsh-auth。
      * 连不上 / 解析失败抛异常；其余情况返回带状态码的响应。
      */
     public static Resp fetch(String method, String url, String body,
@@ -131,14 +230,23 @@ public final class DshHttp {
 
     public static Resp fetch(String method, String url, String body,
                              String contentType, int connectMs, int readMs) throws Exception {
-        Resp r = onceRaw(method, url, body, contentType, connectMs, readMs, true);
+        Resp r = onceRaw(method, url, body, contentType, connectMs, readMs);
         if (r == null) return null;
+
+        // 第 1 层：被 access-gate 踢去登录页
         if (r.status >= 300 && r.status < 400) {
             String loc = r.header("location");
-            if (loc != null && loc.startsWith(LOGIN_PATH)) {
+            if (loc != null && loc.contains(LOGIN_PATH)) {
                 if (login(url, connectMs, readMs)) {
-                    r = onceRaw(method, url, body, contentType, connectMs, readMs, true);
+                    r = onceRaw(method, url, body, contentType, connectMs, readMs);
                 }
+            }
+        }
+
+        // 第 2 层：gate 过了但 DSH 不认（纯文本 401）
+        if (r != null && r.status == 401) {
+            if (ensureDshAuth(url, connectMs, readMs)) {
+                r = onceRaw(method, url, body, contentType, connectMs, readMs);
             }
         }
         return r;
@@ -173,21 +281,17 @@ public final class DshHttp {
             String body = "password=" + enc(pass) + "&next=" + enc("/");
             String url = scheme + "://" + hostHeader(host, port, defaultPort) + LOGIN_PATH;
 
-            Resp r = oncePost(url, body, connectMs, readMs);
+            Resp r = onceRaw("POST", url, body, FORM_CT, connectMs, readMs);
             if (r == null) {
                 lastAuthError = "登录无响应";
                 lastLoginFailAt = now;
                 return false;
             }
-            String setCookie = r.header("set-cookie");
-            if (setCookie != null) {
-                String token = extractToken(setCookie);
-                if (token != null) {
-                    cookie = token;
-                    lastAuthError = null;
-                    lastLoginFailAt = 0;
-                    return true;
-                }
+            absorbCookies(r);
+            if (hasGateCookie()) {
+                lastAuthError = null;
+                lastLoginFailAt = 0;
+                return true;
             }
             if (r.status == 401) {
                 lastAuthError = "密码不对";
@@ -203,16 +307,71 @@ public final class DshHttp {
         }
     }
 
-    private static Resp oncePost(String url, String body, int connectMs, int readMs) throws Exception {
-        return onceRaw("POST", url, body, FORM_CT, connectMs, readMs, false);
+    /**
+     * 补齐 DSH 自己的签名 cookie。
+     *
+     * 顺序：确保 gate cookie → 拿到 launch token（没有就现登一次）→
+     * `GET /?token=...` 触发 DSH 的 303 + Set-Cookie → 收进 jar。
+     * token 只能从密码登录的 Location 里来，所以第二次进这里会重登一次。
+     */
+    public static boolean ensureDshAuth(String anyUrl, int connectMs, int readMs) {
+        if (hasDshAuth()) return true;
+        Boolean busy = authBusy.get();
+        if (busy != null && busy) return false;
+        authBusy.set(true);
+        try {
+            if (!hasGateCookie()) {
+                if (!login(anyUrl, connectMs, readMs)) return false;
+            }
+            if (launchToken == null) {
+                if (!login(anyUrl, connectMs, readMs)) return false;
+            }
+            if (launchToken == null) {
+                lastAuthError = "拿不到 DSH 启动 token";
+                return false;
+            }
+            URL u = new URL(anyUrl);
+            String scheme = u.getProtocol() == null ? "http" : u.getProtocol().toLowerCase(Locale.US);
+            int defaultPort = "https".equals(scheme) ? 443 : 80;
+            int port = u.getPort() < 0 ? defaultPort : u.getPort();
+            String url = scheme + "://" + hostHeader(u.getHost(), port, defaultPort)
+                    + "/?token=" + enc(launchToken);
+            Resp r = onceRaw("GET", url, null, DEFAULT_CT, connectMs, readMs);
+            absorbCookies(r);
+            if (hasDshAuth()) {
+                lastAuthError = null;
+                return true;
+            }
+            // token 过期了（服务端重启过）：重新登录换一个新 token 再来一次
+            launchToken = null;
+            if (login(anyUrl, connectMs, readMs) && launchToken != null) {
+                Resp r2 = onceRaw("GET", scheme + "://" + hostHeader(u.getHost(), port, defaultPort)
+                        + "/?token=" + enc(launchToken), null, DEFAULT_CT, connectMs, readMs);
+                absorbCookies(r2);
+                if (hasDshAuth()) {
+                    lastAuthError = null;
+                    return true;
+                }
+            }
+            lastAuthError = "DSH 会话建立失败";
+            return false;
+        } catch (Throwable t) {
+            lastAuthError = "建立 DSH 会话出错 " + t;
+            return false;
+        } finally {
+            authBusy.set(false);
+        }
     }
 
+    // ------------------------------------------------------------------
+    // 底层
+    // ------------------------------------------------------------------
+
     /**
-     * 与 once() 同构，但可以指定 Content-Type、并可选是否附带当前 cookie。
-     * 登录请求本身不带 cookie（带了也没用，反而可能进"已登录直接跳转"分支）。
+     * 与 once() 同构，但可以指定 Content-Type。cookie 由 jar 统一决定。
      */
     private static Resp onceRaw(String method, String url, String body, String contentType,
-                                int connectMs, int readMs, boolean withCookie) throws Exception {
+                                int connectMs, int readMs) throws Exception {
         URL u = new URL(url);
         String scheme = u.getProtocol() == null ? "http" : u.getProtocol().toLowerCase(Locale.US);
         int defaultPort = "https".equals(scheme) ? 443 : 80;
@@ -230,9 +389,8 @@ public final class DshHttp {
             req.append("Connection: close\r\n");
             req.append("Accept: text/html,application/json,*/*\r\n");
             req.append("User-Agent: dsh-pet-android\r\n");
-            if (withCookie && cookie != null) {
-                req.append("Cookie: ").append(COOKIE_NAME).append('=').append(cookie).append("\r\n");
-            }
+            String ck = cookieHeader();
+            if (ck != null) req.append("Cookie: ").append(ck).append("\r\n");
             byte[] bb = body == null ? null : body.getBytes("UTF-8");
             if (bb != null) {
                 req.append("Content-Type: ").append(contentType).append("\r\n");
@@ -260,19 +418,6 @@ public final class DshHttp {
             }
         }
     }
-
-    private static String extractToken(String setCookie) {
-        int i = setCookie.indexOf(COOKIE_NAME + "=");
-        if (i < 0) return null;
-        int from = i + COOKIE_NAME.length() + 1;
-        int semi = setCookie.indexOf(';', from);
-        String v = (semi < 0 ? setCookie.substring(from) : setCookie.substring(from, semi)).trim();
-        return v.isEmpty() ? null : v;
-    }
-
-    // ------------------------------------------------------------------
-    // 底层
-    // ------------------------------------------------------------------
 
     /**
      * 建连；https 用系统信任库并做主机名校验（裸 SSLSocket 默认不校验主机名）。
@@ -360,7 +505,7 @@ public final class DshHttp {
     private static String readAll(Socket s) throws Exception {
         InputStream in = s.getInputStream();
         ByteArrayOutputStream bos = new ByteArrayOutputStream(4096);
-        byte[] buf = new byte[4096];
+        byte[] buf = new byte[8192];
         int n;
         int total = 0;
         while ((n = in.read(buf)) > 0) {
@@ -397,6 +542,21 @@ public final class DshHttp {
             return java.net.URLEncoder.encode(v, "UTF-8");
         } catch (Exception e) {
             return v;
+        }
+    }
+
+    /** 把一个 endpoint base（…/dsh-pet-7340）剥成 origin（scheme://host[:port]）。 */
+    public static String originOf(String base) {
+        if (base == null || base.isEmpty()) return "";
+        try {
+            URL u = new URL(base);
+            String scheme = u.getProtocol() == null ? "http" : u.getProtocol().toLowerCase(Locale.US);
+            int defaultPort = "https".equals(scheme) ? 443 : 80;
+            int port = u.getPort() < 0 ? defaultPort : u.getPort();
+            return scheme + "://" + hostHeader(u.getHost(), port, defaultPort);
+        } catch (Exception e) {
+            int i = base.indexOf("/", base.indexOf("://") + 3);
+            return i < 0 ? base : base.substring(0, i);
         }
     }
 }
