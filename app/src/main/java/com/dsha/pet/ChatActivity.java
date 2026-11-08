@@ -1,23 +1,47 @@
 package com.dsha.pet;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Intent;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * App 里的聊天：左侧会话抽屉 + 聊天流，跟网页用的是同一份会话。
@@ -26,17 +50,25 @@ import java.util.List;
  * 那个是插件自己的独立身份（sessionId 写死 "dsh-pet"），看不到网页里聊过的东西。
  *
  * 交互：
- *   顶栏「≡」开合左侧会话抽屉；点会话加载前后各一页历史；发消息后
- *   用 session/wait 阻塞到这一轮跑完，回复直接拿到，不用轮询。
+ *   左上角「≡」开合左侧会话抽屉（按工作区分组），「新」开新会话；
+ *   点会话加载前后各一页历史；发消息后用 session/wait 阻塞到这一轮跑完。
+ *   输入框左边的「＋」可以选图片或附件一起发；气泡里的图片直接显示，
+ *   文件点一下才下载到本地（默认不占流量）。
  */
 public class ChatActivity extends Activity {
     /** 打开过的会话记在本地，下次进来接着聊。 */
     private static final String PREFS = "dsh_pet_chat";
     private static final String K_LAST = "last_session";
-    /** 一次拉多少条 assistant 记录（体积不小，别贪）。 */
+    /** 一次拉多少条记录（体积不小，别贪）。 */
     private static final int PAGE_MESSAGES = 6;
     /** 提示行的 tag，真消息进来时要清掉。 */
     private static final String TAG_NOTICE = "notice";
+    private static final int REQ_PICK_IMAGE = 11;
+    private static final int REQ_PICK_FILE = 12;
+    /** 单次上传上限，超过就不让发（手机流量和内存都受不了）。 */
+    private static final long MAX_UPLOAD = 24L * 1024 * 1024;
+    /** 气泡里图片缩略图的最大宽度。 */
+    private static final int THUMB_DP = 200;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -46,6 +78,7 @@ public class ChatActivity extends Activity {
     private LinearLayout sidebar;
     private LinearLayout sessionList;
     private LinearLayout feed;
+    private LinearLayout pendingBar;
     private ScrollView scroll;
     private EditText input;
     private TextView sendBtn;
@@ -54,6 +87,18 @@ public class ChatActivity extends Activity {
     private Typeface cute;
 
     private final List<DshApi.SessionRow> rows = new ArrayList<>();
+    /** 抽屉里收起的工作区分组（按 cwd 记）。 */
+    private final Set<String> collapsedGroups = new LinkedHashSet<>();
+    /** 待发送的附件（选好了还没发出去）。 */
+    private final List<Pending> pending = new ArrayList<>();
+    /** 图片字节缓存，翻页/重绘时不用重复拉。 */
+    private final Map<String, Bitmap> imageCache = new LinkedHashMap<String, Bitmap>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) {
+            return size() > 24;
+        }
+    };
+
     private String currentId = null;
     private String currentCwd = null;
     private long oldestSeq = 0;
@@ -61,6 +106,13 @@ public class ChatActivity extends Activity {
     private boolean sending = false;
     private boolean loading = false;
     private boolean sidebarOpen = true;
+
+    /** 一个待发送的本地文件。 */
+    private static final class Pending {
+        Uri uri;
+        String name;
+        String mime;
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -141,14 +193,35 @@ public class ChatActivity extends Activity {
         return col;
     }
 
+    /**
+     * 顶栏：开合抽屉、新会话都放左边（右手拿平板时左边够得着，也不挡标题），
+     * 关闭留在最右。
+     */
     private View buildBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(12), dp(34), dp(12), dp(12));
 
+        bar.addView(barBtn("≡", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleSidebar();
+            }
+        }));
+        bar.addView(barBtn("新", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                newSession();
+            }
+        }));
+
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(6);
+        texts.setLayoutParams(tlp);
 
         titleView = new TextView(this);
         titleView.setText("大肥鱼");
@@ -168,21 +241,8 @@ public class ChatActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         subLp.topMargin = dp(3);
         texts.addView(subtitleView, subLp);
-        bar.addView(texts, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(texts);
 
-        bar.addView(barBtn("≡", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                toggleSidebar();
-            }
-        }));
-        bar.addView(barBtn("新", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                newSession();
-            }
-        }));
         bar.addView(barBtn("关闭", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -263,7 +323,7 @@ public class ChatActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // 会话列表
+    // 会话列表（按工作区分组）
     // ------------------------------------------------------------------
 
     private String origin() {
@@ -312,9 +372,74 @@ public class ChatActivity extends Activity {
             addSideNotice("还没有会话，点上面「新」开一个。");
             return;
         }
-        for (int i = 0; i < data.size(); i++) {
-            sessionList.addView(sessionItem(data.get(i)));
+        // 先用 LinkedHashMap 保序分组：服务端已经按活跃度排好，这里不重排
+        Map<String, List<DshApi.SessionRow>> groups = new LinkedHashMap<>();
+        for (DshApi.SessionRow r : data) {
+            String key = (r.cwd == null || r.cwd.isEmpty()) ? "" : r.cwd;
+            List<DshApi.SessionRow> bucket = groups.get(key);
+            if (bucket == null) {
+                bucket = new ArrayList<>();
+                groups.put(key, bucket);
+            }
+            bucket.add(r);
         }
+        for (Map.Entry<String, List<DshApi.SessionRow>> e : groups.entrySet()) {
+            sessionList.addView(groupHeader(e.getKey(), e.getValue().size()));
+            if (collapsedGroups.contains(e.getKey())) continue;
+            for (DshApi.SessionRow r : e.getValue()) {
+                sessionList.addView(sessionItem(r));
+            }
+        }
+    }
+
+    /** 目录名：分组标题用最后一段，根目录就显示整条。 */
+    private static String dirName(String path) {
+        if (path == null || path.isEmpty()) return "未分组";
+        String p = path;
+        while (p.length() > 1 && p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        int i = p.lastIndexOf('/');
+        if (i >= 0 && i + 1 < p.length()) return p.substring(i + 1);
+        return p;
+    }
+
+    private View groupHeader(final String cwd, int count) {
+        boolean folded = collapsedGroups.contains(cwd);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(10), dp(12), dp(8), dp(6));
+
+        TextView caret = new TextView(this);
+        caret.setText(folded ? "▸" : "▾");
+        caret.setTextSize(11);
+        caret.setTextColor(0xFF9A97B8);
+        caret.setPadding(0, 0, dp(6), 0);
+        head.addView(caret);
+
+        TextView name = new TextView(this);
+        name.setText(dirName(cwd));
+        name.setTextSize(12);
+        name.setTextColor(0xFF8A85A8);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.START);
+        head.addView(name, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView n = new TextView(this);
+        n.setText(String.valueOf(count));
+        n.setTextSize(10);
+        n.setTextColor(0xFFB4B0CC);
+        n.setPadding(dp(6), 0, 0, 0);
+        head.addView(n);
+
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!collapsedGroups.remove(cwd)) collapsedGroups.add(cwd);
+                renderSessions(rows, null);
+            }
+        });
+        return head;
     }
 
     private void addSideNotice(String text) {
@@ -363,19 +488,6 @@ public class ChatActivity extends Activity {
         }
         card.addView(line);
 
-        String sub = row.cwd == null ? "" : row.cwd;
-        int i = sub.lastIndexOf('/');
-        if (i >= 0 && i + 1 < sub.length()) sub = sub.substring(i + 1);
-        TextView s = new TextView(this);
-        s.setText(sub.isEmpty() ? "—" : sub);
-        s.setTextSize(10);
-        s.setTextColor(0xFF9A97B8);
-        s.setSingleLine(true);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(2);
-        card.addView(s, slp);
-
         card.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -390,8 +502,7 @@ public class ChatActivity extends Activity {
     }
 
     private boolean isNarrow() {
-        return getResources().getDisplayMetrics().widthPixels
-                < dp(600);
+        return getResources().getDisplayMetrics().widthPixels < dp(600);
     }
 
     /** 第一次进来挑一个：优先上次那个，否则第一个。 */
@@ -408,7 +519,7 @@ public class ChatActivity extends Activity {
         if (!rows.isEmpty()) openSession(rows.get(0));
         else {
             clearFeed();
-            addNotice("还没有会话，点「新」开一个，或者左上角「≡」换一个。");
+            addNotice("还没有会话，点左上角「新」开一个。");
         }
     }
 
@@ -419,7 +530,7 @@ public class ChatActivity extends Activity {
         hasMore = false;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(K_LAST, row.id).apply();
         titleView.setText(row.label());
-        subtitleView.setText(row.model == null ? "DSH 会话" : row.model);
+        subtitleView.setText(dirName(row.cwd));
         renderSessions(rows, null);
         if (isNarrow()) toggleSidebar();
         loadLatest();
@@ -460,7 +571,6 @@ public class ChatActivity extends Activity {
                         DshApi.SessionRow row = new DshApi.SessionRow();
                         row.id = sid;
                         row.cwd = useCwd;
-                        row.title = "新会话";
                         currentId = sid;
                         currentCwd = useCwd;
                         oldestSeq = 0;
@@ -469,7 +579,7 @@ public class ChatActivity extends Activity {
                                 .edit().putString(K_LAST, sid).apply();
                         rows.add(0, row);
                         titleView.setText("新会话");
-                        subtitleView.setText("DSH 会话");
+                        subtitleView.setText(dirName(useCwd));
                         renderSessions(rows, null);
                         clearFeed();
                         addNotice("会话开好了，说吧。");
@@ -591,53 +701,301 @@ public class ChatActivity extends Activity {
         scrollBottom();
     }
 
-    /** 一条消息的视图：用户右侧紫气泡，助手左侧白气泡，工具灰字小行。 */
-    private View msgView(DshApi.Msg m) {
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rlp.topMargin = dp(8);
+    /** 一条消息：纵向排开正文、图片、附件，各自对齐。 */
+    private View msgView(final DshApi.Msg m) {
+        if (m.parts.isEmpty()) return null;
+        boolean mine = "user".equals(m.role);
 
-        if ("tool".equals(m.role)) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(8);
+        col.setLayoutParams(clp);
+
+        // 正文先合并成一条气泡，图片和文件排在它下面
+        StringBuilder body = new StringBuilder();
+        for (DshApi.Part p : m.parts) {
+            if (p.kind == DshApi.Part.TEXT) {
+                String t = cleanText(p.text);
+                if (t == null) continue;
+                if (body.length() > 0) body.append('\n');
+                body.append(t);
+            }
+        }
+        if (body.length() > 0) {
+            LinearLayout rowLine = new LinearLayout(this);
+            rowLine.setOrientation(LinearLayout.HORIZONTAL);
+            rowLine.setGravity(mine ? Gravity.END : Gravity.START);
+
             TextView tv = new TextView(this);
-            tv.setText(m.text);
-            tv.setTextSize(11);
-            tv.setTextColor(m.error ? 0xFFC9788A : 0xFF9A97B8);
-            tv.setPadding(dp(10), dp(6), dp(10), dp(6));
+            tv.setText(body.toString());
+            tv.setTextSize(15);
+            tv.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
+            tv.setTextIsSelectable(true);
+            tv.setPadding(dp(14), dp(10), dp(14), dp(10));
             GradientDrawable g = new GradientDrawable();
-            g.setCornerRadius(dp(9));
-            g.setColor(m.error ? 0x14C9788A : 0x0F000000);
+            g.setCornerRadius(dp(16));
+            g.setColor(mine ? 0xFFA98CFF : 0xFFFFFFFF);
             tv.setBackground(g);
-            tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.86f));
-            LinearLayout line = new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            line.setGravity(Gravity.START);
-            line.addView(tv);
-            line.setLayoutParams(rlp);
-            return line;
+            tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78f));
+            if (!mine && cute != null) tv.setTypeface(cute);
+            rowLine.addView(tv);
+            col.addView(rowLine);
         }
 
-        boolean mine = "user".equals(m.role);
-        String body = cleanText(m.text);
-        if (body == null) return null;
+        for (DshApi.Part p : m.parts) {
+            if (p.kind == DshApi.Part.IMAGE) {
+                col.addView(imageBlock(p, mine));
+            } else if (p.kind == DshApi.Part.FILE || p.kind == DshApi.Part.PRESENTED) {
+                col.addView(fileChip(p, mine));
+            }
+        }
+        return col;
+    }
+
+    /** 图片块：先占位再后台拉字节，拉到就贴上（同一张图有缓存）。 */
+    private View imageBlock(final DshApi.Part p, boolean mine) {
         LinearLayout rowLine = new LinearLayout(this);
         rowLine.setOrientation(LinearLayout.HORIZONTAL);
         rowLine.setGravity(mine ? Gravity.END : Gravity.START);
-
-        TextView tv = new TextView(this);
-        tv.setText(body);
-        tv.setTextSize(15);
-        tv.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
-        tv.setTextIsSelectable(true);
-        tv.setPadding(dp(14), dp(10), dp(14), dp(10));
-        GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(dp(16));
-        g.setColor(mine ? 0xFFA98CFF : 0xFFFFFFFF);
-        tv.setBackground(g);
-        tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78f));
-        if (!mine && cute != null) tv.setTypeface(cute);
-        rowLine.addView(tv);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(6);
         rowLine.setLayoutParams(rlp);
+
+        final ImageView iv = new ImageView(this);
+        int w = dp(THUMB_DP);
+        int h = dp(THUMB_DP * 0.75f);
+        if (p.width > 0 && p.height > 0) {
+            h = (int) (w * (float) p.height / (float) p.width);
+            int maxH = dp(THUMB_DP * 1.6f);
+            if (h > maxH) {
+                h = maxH;
+                w = (int) (h * (float) p.width / (float) p.height);
+            }
+        }
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(12));
+        bg.setColor(0xFFEFEBFA);
+        iv.setBackground(bg);
+        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        iv.setClipToOutline(true);
+        iv.setLayoutParams(new LinearLayout.LayoutParams(w, h));
+
+        final String key = p.attachment == null ? null
+                : p.attachment.optString("attachmentId", null);
+        Bitmap cached = key == null ? null : imageCache.get(key);
+        if (cached != null) {
+            iv.setImageBitmap(cached);
+        } else if (key != null) {
+            final String org = origin();
+            final String sid = currentId;
+            final DshApi.Part part = p;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    final byte[] data = DshApi.attachmentBytes(org, sid, part.attachment);
+                    if (data == null) return;
+                    final Bitmap bm = decodeThumb(data, dp(THUMB_DP * 2));
+                    if (bm == null) return;
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            imageCache.put(key, bm);
+                            iv.setImageBitmap(bm);
+                        }
+                    });
+                }
+            }).start();
+        }
+        rowLine.addView(iv);
         return rowLine;
+    }
+
+    /**
+     * 附件行：一行小卡片，点一下才下载。
+     * 默认不落地——手机流量和设备空间都是老周自己的。
+     */
+    private View fileChip(final DshApi.Part p, boolean mine) {
+        LinearLayout rowLine = new LinearLayout(this);
+        rowLine.setOrientation(LinearLayout.HORIZONTAL);
+        rowLine.setGravity(mine ? Gravity.END : Gravity.START);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(6);
+        rowLine.setLayoutParams(rlp);
+
+        LinearLayout chip = new LinearLayout(this);
+        chip.setOrientation(LinearLayout.HORIZONTAL);
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(12), dp(9), dp(12), dp(9));
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(14));
+        g.setColor(mine ? 0x33FFFFFF : 0xFFFFFFFF);
+        chip.setBackground(g);
+
+        TextView icon = new TextView(this);
+        icon.setText("📎");
+        icon.setTextSize(14);
+        icon.setPadding(0, 0, dp(8), 0);
+        chip.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+
+        TextView nm = new TextView(this);
+        nm.setText(p.name == null || p.name.isEmpty() ? "附件" : p.name);
+        nm.setTextSize(13);
+        nm.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
+        nm.setSingleLine(true);
+        nm.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        texts.addView(nm);
+
+        TextView meta = new TextView(this);
+        meta.setText(p.kind == DshApi.Part.PRESENTED ? "点一下下载"
+                : ("点一下下载" + (p.bytes > 0 ? " · " + sizeText(p.bytes) : "")));
+        meta.setTextSize(10);
+        meta.setTextColor(mine ? 0xD9FFFFFF : 0xFF9A97B8);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.topMargin = dp(2);
+        texts.addView(meta, mlp);
+        chip.addView(texts);
+
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                downloadPart(p);
+            }
+        });
+        rowLine.addView(chip);
+        return rowLine;
+    }
+
+    /** 点附件：把它拉到本地 Downloads 里，成功/失败都给一句人话。 */
+    private void downloadPart(final DshApi.Part p) {
+        final String org = origin();
+        final String sid = currentId;
+        if (sid == null) return;
+        Toast.makeText(this, "开始下载 " + (p.name == null ? "" : p.name), Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                byte[] data;
+                if (p.kind == DshApi.Part.PRESENTED) {
+                    data = DshApi.fileBytes(org, p.path);
+                } else {
+                    data = DshApi.attachmentBytes(org, sid, p.attachment);
+                }
+                final String name = (p.name == null || p.name.isEmpty())
+                        ? ("dsh-" + System.currentTimeMillis()) : p.name;
+                final String where = data == null ? null : saveToDownloads(name, p.mediaType, data);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (where == null) {
+                            Toast.makeText(ChatActivity.this,
+                                    "下载失败，检查一下 DSH 连接", Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(ChatActivity.this,
+                                    "已保存到 " + where, Toast.LENGTH_LONG).show();
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * 落盘。Android 10 起走 MediaStore 的 Downloads（不需要存储权限），
+     * 更老的系统只能放应用自己的外部目录。
+     *
+     * @return 人能看懂的位置，失败返回 null
+     */
+    private String saveToDownloads(String name, String mime, byte[] data) {
+        String type = (mime == null || mime.isEmpty()) ? mimeOf(name) : mime;
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                cv.put(MediaStore.Downloads.MIME_TYPE, type);
+                Uri uri = getContentResolver()
+                        .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (uri == null) return null;
+                OutputStream os = getContentResolver().openOutputStream(uri);
+                if (os == null) return null;
+                try {
+                    os.write(data);
+                    os.flush();
+                } finally {
+                    os.close();
+                }
+                return "下载/" + name;
+            }
+            File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (dir == null) dir = getFilesDir();
+            if (!dir.exists() && !dir.mkdirs()) return null;
+            File f = new File(dir, name);
+            FileOutputStream fos = new FileOutputStream(f);
+            try {
+                fos.write(data);
+                fos.flush();
+            } finally {
+                fos.close();
+            }
+            return f.getAbsolutePath();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String mimeOf(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US);
+        if (n.endsWith(".png")) return "image/png";
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+        if (n.endsWith(".webp")) return "image/webp";
+        if (n.endsWith(".gif")) return "image/gif";
+        if (n.endsWith(".pdf")) return "application/pdf";
+        if (n.endsWith(".apk")) return "application/vnd.android.package-archive";
+        if (n.endsWith(".zip")) return "application/zip";
+        if (n.endsWith(".mp4")) return "video/mp4";
+        if (n.endsWith(".mp3")) return "audio/mpeg";
+        if (n.endsWith(".txt") || n.endsWith(".md")) return "text/plain";
+        if (n.endsWith(".json")) return "application/json";
+        return "application/octet-stream";
+    }
+
+    private static String sizeText(long bytes) {
+        if (bytes < 1024) return bytes + "B";
+        if (bytes < 1024 * 1024) return (bytes / 1024) + "KB";
+        return String.format(Locale.US, "%.1fMB", bytes / 1048576.0);
+    }
+
+    /** 按最大边缩一下再解码，别把原图整张塞进内存。 */
+    private static Bitmap decodeThumb(byte[] data, int maxSide) {
+        try {
+            BitmapFactory.Options probe = new BitmapFactory.Options();
+            probe.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, probe);
+            int big = Math.max(probe.outWidth, probe.outHeight);
+            int sample = 1;
+            while (big / sample > maxSide * 2) sample *= 2;
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inSampleSize = sample;
+            Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length, o);
+            if (bm != null && Math.max(bm.getWidth(), bm.getHeight()) > maxSide) {
+                float scale = maxSide / (float) Math.max(bm.getWidth(), bm.getHeight());
+                Bitmap small = Bitmap.createScaledBitmap(bm,
+                        Math.max(1, (int) (bm.getWidth() * scale)),
+                        Math.max(1, (int) (bm.getHeight() * scale)), true);
+                if (small != bm) bm.recycle();
+                return small;
+            }
+            return bm;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -645,14 +1003,31 @@ public class ChatActivity extends Activity {
     // ------------------------------------------------------------------
 
     private View buildInput() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFFFFFFFF);
+        wrap.setBackground(bg);
+        wrap.setPadding(dp(10), dp(8), dp(10), dp(12));
+        wrap.setElevation(dp(2));
+
+        // 选好了还没发的附件：一排小卡片，点 × 撤掉
+        pendingBar = new LinearLayout(this);
+        pendingBar.setOrientation(LinearLayout.VERTICAL);
+        wrap.addView(pendingBar);
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.HORIZONTAL);
         box.setGravity(Gravity.BOTTOM);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFFFFFFFF);
-        box.setBackground(bg);
-        box.setPadding(dp(14), dp(10), dp(14), dp(14));
-        box.setElevation(dp(2));
+
+        TextView plus = barBtn("＋", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickWhat();
+            }
+        });
+        plus.setTextColor(0xFF7B6BB5);
+        box.addView(plus);
 
         input = new EditText(this);
         input.setHint("跟本鱼说点什么…");
@@ -688,7 +1063,126 @@ public class ChatActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         blp.leftMargin = dp(10);
         box.addView(sendBtn, blp);
-        return box;
+
+        wrap.addView(box);
+        return wrap;
+    }
+
+    /** 「＋」弹一个小选择：发图片还是发文件。 */
+    private void pickWhat() {
+        final String[] items = new String[]{"图片", "文件"};
+        new AlertDialog.Builder(this)
+                .setItems(items, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        openPicker(which == 0 ? "image/*" : "*/*",
+                                which == 0 ? REQ_PICK_IMAGE : REQ_PICK_FILE);
+                    }
+                })
+                .show();
+    }
+
+    private void openPicker(String mime, int req) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(mime);
+        try {
+            startActivityForResult(i, req);
+        } catch (Exception e) {
+            Toast.makeText(this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (res != RESULT_OK || data == null || data.getData() == null) return;
+        if (req != REQ_PICK_IMAGE && req != REQ_PICK_FILE) return;
+        Uri uri = data.getData();
+        Pending p = new Pending();
+        p.uri = uri;
+        p.name = queryName(uri);
+        p.mime = queryMime(uri, p.name);
+        boolean img = p.mime != null && p.mime.startsWith("image/");
+        if (p.name == null || p.name.isEmpty()) {
+            p.name = img ? "image.png" : "file";
+        }
+        pending.add(p);
+        renderPending();
+        scrollBottom();
+    }
+
+    /** 优先问系统要 MIME，问不到按后缀猜。 */
+    private String queryMime(Uri uri, String name) {
+        try {
+            String t = getContentResolver().getType(uri);
+            if (t != null && !t.isEmpty()) return t;
+        } catch (Exception ignored) {
+        }
+        return mimeOf(name);
+    }
+
+    /** 文件选择器给的 Uris 拿不到路径，只能问名字。 */
+    private String queryName(Uri uri) {
+        Cursor c = null;
+        try {
+            ContentResolver cr = getContentResolver();
+            c = cr.query(uri, null, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) return c.getString(idx);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? null : last;
+    }
+
+    private void renderPending() {
+        pendingBar.removeAllViews();
+        if (pending.isEmpty()) return;
+        for (int i = 0; i < pending.size(); i++) {
+            final int idx = i;
+            Pending p = pending.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(10), dp(6), dp(10), dp(6));
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(12));
+            g.setColor(0xFFF2EEFF);
+            row.setBackground(g);
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rlp.bottomMargin = dp(6);
+            row.setLayoutParams(rlp);
+
+            TextView nm = new TextView(this);
+            nm.setText("📎 " + p.name);
+            nm.setTextSize(12);
+            nm.setTextColor(0xFF5A48A8);
+            nm.setSingleLine(true);
+            nm.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            row.addView(nm, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            TextView x = new TextView(this);
+            x.setText("×");
+            x.setTextSize(16);
+            x.setTextColor(0xFF9A97B8);
+            x.setPadding(dp(10), 0, dp(4), 0);
+            x.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (idx >= 0 && idx < pending.size()) pending.remove(idx);
+                    renderPending();
+                }
+            });
+            row.addView(x);
+            pendingBar.addView(row);
+        }
     }
 
     private void send() {
@@ -698,12 +1192,32 @@ public class ChatActivity extends Activity {
             return;
         }
         final String text = input.getText().toString().trim();
-        if (text.isEmpty()) return;
+        if (text.isEmpty() && pending.isEmpty()) return;
         input.setText("");
+
+        // 本地先把这条消息画出来，附件的名字也一起显示
         DshApi.Msg mine = new DshApi.Msg();
         mine.role = "user";
         mine.text = text;
+        if (!text.isEmpty()) {
+            DshApi.Part tp = new DshApi.Part();
+            tp.kind = DshApi.Part.TEXT;
+            tp.text = text;
+            mine.parts.add(tp);
+        }
+        final List<Pending> sendingFiles = new ArrayList<>(pending);
+        for (Pending p : sendingFiles) {
+            DshApi.Part part = new DshApi.Part();
+            boolean img = p.mime != null && p.mime.startsWith("image/");
+            part.kind = img ? DshApi.Part.IMAGE : DshApi.Part.FILE;
+            part.name = p.name;
+            part.attachment = null;
+            mine.parts.add(part);
+        }
+        pending.clear();
+        renderPending();
         addMsg(mine);
+
         final View typing = addTyping();
         sending = true;
         sendBtn.setAlpha(0.5f);
@@ -714,20 +1228,43 @@ public class ChatActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                String err = null;
+                List<String> receipts = new ArrayList<>();
+                for (Pending p : sendingFiles) {
+                    byte[] data = readUri(p.uri);
+                    if (data == null) {
+                        err = "读不到 " + p.name;
+                        break;
+                    }
+                    if (data.length > MAX_UPLOAD) {
+                        err = p.name + " 太大（上限 24MB）";
+                        break;
+                    }
+                    String mime = imageMimeOrNull(p.mime, p.name);
+                    String[] upErr = new String[1];
+                    String rid = DshApi.upload(org, sid, p.name, mime, data, upErr);
+                    if (rid == null) {
+                        err = upErr[0] == null ? "上传失败" : upErr[0];
+                        break;
+                    }
+                    receipts.add(rid);
+                }
+
                 // 1) 发之前先读 cursor，等回复时用它当 afterSeq
                 long[] cursor = new long[1];
                 DshApi.state(org, sid, cursor, null);
                 long after = cursor[0];
-                // 2) 投递
-                DshApi.Result p = DshApi.prompt(org, sid, text);
+
                 final List<DshApi.Msg> got = new ArrayList<>();
-                String err = null;
-                if (!p.ok) {
-                    err = p.msg;
-                } else {
-                    // 3) 阻塞等这一轮跑完（主机侧会话空闲才回）
-                    DshApi.Result w = DshApi.waitIdle(org, sid, after, 180000, got);
-                    if (!w.ok) err = w.msg;
+                if (err == null) {
+                    DshApi.Result p = DshApi.prompt(org, sid, text, receipts);
+                    if (!p.ok) {
+                        err = p.msg;
+                    } else {
+                        // 2) 阻塞等这一轮跑完（主机侧会话空闲才回）
+                        DshApi.Result w = DshApi.waitIdle(org, sid, after, 180000, got);
+                        if (!w.ok) err = w.msg;
+                    }
                 }
                 final String fErr = err;
                 ui.post(new Runnable() {
@@ -751,6 +1288,45 @@ public class ChatActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    /** 读选中文件的字节。 */
+    private byte[] readUri(Uri uri) {
+        InputStream in = null;
+        try {
+            in = getContentResolver().openInputStream(uri);
+            if (in == null) return null;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(8192);
+            byte[] buf = new byte[8192];
+            int n;
+            long total = 0;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                total += n;
+                if (total > MAX_UPLOAD) return null;
+            }
+            return bos.toByteArray();
+        } catch (Exception e) {
+            return null;
+        } finally {
+            try {
+                if (in != null) in.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * 服务端图片白名单只有 png/jpeg/webp/gif 四种，别的一律当普通文件传
+     * （传错 mediaType 会被 400 挡回来）。
+     */
+    private static String imageMimeOrNull(String mime, String name) {
+        String m = (mime == null || mime.isEmpty()) ? mimeOf(name) : mime;
+        if ("image/png".equals(m) || "image/jpeg".equals(m)
+                || "image/webp".equals(m) || "image/gif".equals(m)) {
+            return m;
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------

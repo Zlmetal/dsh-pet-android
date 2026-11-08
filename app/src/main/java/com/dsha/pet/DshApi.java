@@ -1,5 +1,7 @@
 package com.dsha.pet;
 
+import android.util.Base64;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -155,17 +157,49 @@ public final class DshApi {
     }
 
     // ------------------------------------------------------------------
-    // 历史
+    // 消息内容块
     // ------------------------------------------------------------------
+
+    /** 消息里的一个内容块：正文、图片、附件文件、present 出来的文件。 */
+    public static final class Part {
+        public static final int TEXT = 0;
+        public static final int IMAGE = 1;
+        public static final int FILE = 2;
+        /** present 工具声明的磁盘文件（不是 attachment，走 /api/file 读）。 */
+        public static final int PRESENTED = 3;
+
+        public int kind;
+        public String text;
+        /** attachment 引用（image/file 两种块共用），读字节时整块回传。 */
+        public JSONObject attachment;
+        public String mediaType;
+        public String name;
+        public long bytes;
+        public int width;
+        public int height;
+        /** PRESENTED 专用：绝对路径。 */
+        public String path;
+        public String description;
+    }
 
     /** 一条要显示在聊天流里的东西。 */
     public static final class Msg {
-        /** user / assistant / tool。 */
+        /** user / assistant。 */
         public String role;
         public String text;
+        /** 图片、附件、present 文件按顺序排；纯文字消息这里只有 TEXT 块。 */
+        public final List<Part> parts = new ArrayList<>();
         public long seq;
         public long time;
         public boolean error;
+
+        /** 有没有除正文以外的东西要画。 */
+        public boolean hasAttachments() {
+            for (Part p : parts) {
+                if (p.kind != Part.TEXT) return true;
+            }
+            return false;
+        }
     }
 
     /** 一页历史的分页信息。 */
@@ -226,6 +260,9 @@ public final class DshApi {
      * 过滤规则很重要：DSH 会把工作区指令、运行时上下文、技能目录、时间戳、
      * 插件注入等等都记成 user/message，全显示出来就是一屏机器话。只有
      * source.kind == "user" 的才是人打的字。
+     *
+     * 另外手机屏小，思考过程（reasoning 块）、工具调用、工具结果、step/job 事件
+     * 一律不显示，只看最终结果。
      */
     private static Msg parseEvent(JSONObject ev) {
         if (ev == null) return null;
@@ -235,55 +272,180 @@ public final class DshApi {
         long time = ev.optLong("time", 0);
 
         if ("user/message".equals(type)) {
-            JSONObject src = data == null ? null : data.optJSONObject("source");
+            if (data == null) return null;
+            JSONObject src = data.optJSONObject("source");
             String kind = src == null ? "" : src.optString("kind", "");
             if (!"user".equals(kind)) return null;
-            String text = textOf(data.optJSONArray("content"));
-            if (text == null || text.trim().isEmpty()) return null;
             Msg m = new Msg();
             m.role = "user";
-            m.text = text.trim();
             m.seq = seq;
             m.time = time;
-            return m;
+            collect(m, data.optJSONArray("content"));
+            return m.parts.isEmpty() ? null : m;
         }
 
         if ("assistant/message".equals(type)) {
             JSONObject msg = data == null ? null : data.optJSONObject("message");
             if (msg == null) return null;
-            // 只取正文块；reasoning 是思考过程，tool-call 由 tool/result 那边呈现
-            String text = textOf(msg.optJSONArray("content"));
-            if (text == null || text.trim().isEmpty()) return null;
             Msg m = new Msg();
             m.role = "assistant";
-            m.text = text.trim();
             m.seq = seq;
             m.time = time;
-            return m;
+            collect(m, msg.optJSONArray("content"));
+            return m.parts.isEmpty() ? null : m;
         }
 
-        // tool/result 不显示：手机屏小，一条 send_meme 的候选清单就能糊满整屏
-        // （十几行「[表情: …] 描述」），对读对话没有任何帮助。只保留人和鱼的正文。
-        if ("tool/result".equals(type)) {
-            return null;
+        // present 工具声明过的文件：单独一条，排在这一轮最后，可以点着下载
+        if ("deliverables/presented".equals(type)) {
+            if (data == null) return null;
+            JSONArray files = data.optJSONArray("files");
+            if (files == null || files.length() == 0) return null;
+            Msg m = new Msg();
+            m.role = "assistant";
+            m.seq = seq;
+            m.time = time;
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject f = files.optJSONObject(i);
+                if (f == null) continue;
+                String p = f.optString("path", "");
+                if (p.isEmpty()) continue;
+                Part part = new Part();
+                part.kind = Part.PRESENTED;
+                part.path = p;
+                part.name = baseName(p);
+                part.description = f.optString("description", "");
+                m.parts.add(part);
+            }
+            return m.parts.isEmpty() ? null : m;
         }
+
+        // tool/result、tool/call、step/*、job/* 全部不显示：手机屏装不下工具细节
         return null;
     }
 
-    /** 把 content 块数组拼成纯文本（只要 type=="text" 的块）。 */
-    private static String textOf(JSONArray content) {
-        if (content == null) return null;
-        StringBuilder sb = new StringBuilder();
+    /** 把 content 块数组收进 Msg（正文拼起来，图片/附件留成 Part）。 */
+    private static void collect(Msg m, JSONArray content) {
+        if (content == null) return;
+        StringBuilder text = new StringBuilder();
         for (int i = 0; i < content.length(); i++) {
             JSONObject b = content.optJSONObject(i);
             if (b == null) continue;
-            if (!"text".equals(b.optString("type", ""))) continue;
-            String t = b.optString("text", "");
-            if (t.isEmpty()) continue;
-            if (sb.length() > 0) sb.append('\n');
-            sb.append(t);
+            String t = b.optString("type", "");
+            if ("text".equals(t)) {
+                String s = b.optString("text", "");
+                if (s.isEmpty()) continue;
+                Part p = new Part();
+                p.kind = Part.TEXT;
+                p.text = s;
+                m.parts.add(p);
+                if (text.length() > 0) text.append('\n');
+                text.append(s);
+            } else if ("image".equals(t) || "file".equals(t)) {
+                JSONObject att = b.optJSONObject("attachment");
+                if (att == null) continue;
+                Part p = new Part();
+                p.kind = "image".equals(t) ? Part.IMAGE : Part.FILE;
+                p.attachment = att;
+                p.name = att.optString("name", "");
+                p.mediaType = att.optString("mediaType", "");
+                p.bytes = att.optLong("bytes", 0L);
+                p.width = att.optInt("width", 0);
+                p.height = att.optInt("height", 0);
+                m.parts.add(p);
+            }
+            // reasoning / tool-call 块直接丢：手机上不看思考过程和工具参数
         }
-        return sb.length() == 0 ? null : sb.toString();
+        m.text = text.length() == 0 ? null : text.toString();
+    }
+
+    static String baseName(String path) {
+        if (path == null) return "";
+        int i = path.lastIndexOf('/');
+        return i >= 0 && i + 1 < path.length() ? path.substring(i + 1) : path;
+    }
+
+    // ------------------------------------------------------------------
+    // 附件与文件
+    // ------------------------------------------------------------------
+
+    /** 读一条 attachment 的原始字节（图片预览、下载用户发来的附件都走这条）。 */
+    public static byte[] attachmentBytes(String origin, String sessionId, JSONObject attachment) {
+        if (attachment == null) return null;
+        JSONObject req = new JSONObject();
+        JSONObject args = new JSONObject();
+        try {
+            req.put("sessionId", sessionId);
+            req.put("attachment", attachment);
+            args.put("request", req);
+        } catch (Exception ignored) {
+        }
+        Result r = call(origin, "session/attachment", args, 4000, 30000);
+        if (!r.ok) return null;
+        String data = r.value.optString("data", "");
+        if (data.isEmpty()) return null;
+        try {
+            return Base64.decode(data, Base64.DEFAULT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 读任意工作区文件的字节（present 出来的文件、回复里提到的路径）。 */
+    public static byte[] fileBytes(String origin, String path) {
+        if (path == null || path.isEmpty()) return null;
+        try {
+            String url = origin + "/api/file?path=" + DshHttp.enc(path);
+            DshHttp.Resp r = DshHttp.fetchBytes("GET", url, null, null, 6000, 120000);
+            if (r == null || r.status != 200) return null;
+            return r.bytes;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 上传一个本地文件/图片，拿回 receiptId（发消息时用）。
+     *
+     * mediaType 只对图片有意义（image/png|jpeg|webp|gif），其它一律传 null 当普通文件。
+     */
+    public static String upload(String origin, String sessionId, String name, String mediaType,
+                                byte[] data, String[] err) {
+        try {
+            StringBuilder q = new StringBuilder();
+            q.append(origin).append("/api/session/uploadFileBinary?sessionId=")
+                    .append(DshHttp.enc(sessionId)).append("&name=").append(DshHttp.enc(name));
+            if (mediaType != null && !mediaType.isEmpty()) {
+                q.append("&mediaType=").append(DshHttp.enc(mediaType));
+            }
+            DshHttp.Resp r = DshHttp.fetchBytes("POST", q.toString(), data,
+                    "application/octet-stream", 6000, 60000);
+            if (r == null) {
+                if (err != null && err.length > 0) err[0] = "上传没响应";
+                return null;
+            }
+            if (r.status != 200) {
+                if (err != null && err.length > 0) err[0] = "上传失败 HTTP " + r.status;
+                return null;
+            }
+            JSONObject o = new JSONObject(r.body);
+            if (!o.optBoolean("ok", false)) {
+                JSONObject e = o.optJSONObject("error");
+                if (err != null && err.length > 0) {
+                    err[0] = e == null ? "上传被拒绝" : e.optString("message", "上传被拒绝");
+                }
+                return null;
+            }
+            JSONObject v = o.optJSONObject("value");
+            String id = v == null ? "" : v.optString("receiptId", "");
+            if (id.isEmpty()) {
+                if (err != null && err.length > 0) err[0] = "没拿到 receiptId";
+                return null;
+            }
+            return id;
+        } catch (Exception e) {
+            if (err != null && err.length > 0) err[0] = "上传出错：" + e.getClass().getSimpleName();
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -318,16 +480,38 @@ public final class DshApi {
         return call(origin, "session/create", args, 4000, 20000);
     }
 
-    /** 投一条用户消息（立即返回 accepted，不等生成）。 */
+    /** 投一条纯文字用户消息（立即返回 accepted，不等生成）。 */
     public static Result prompt(String origin, String sessionId, String text) {
+        return prompt(origin, sessionId, text, null);
+    }
+
+    /**
+     * 投一条用户消息，可带若干已上传的附件（receiptId）。
+     *
+     * 服务端 content 只认三种块：text、image（内联 base64）、file（receiptId）。
+     * 图片和普通文件都能用 file + receiptId，所以上传一次就够。
+     */
+    public static Result prompt(String origin, String sessionId, String text, List<String> receipts) {
         JSONObject req = new JSONObject();
         JSONObject args = new JSONObject();
         try {
             JSONArray content = new JSONArray();
-            JSONObject part = new JSONObject();
-            part.put("type", "text");
-            part.put("text", text);
-            content.put(part);
+            if (text != null && !text.trim().isEmpty()) {
+                JSONObject part = new JSONObject();
+                part.put("type", "text");
+                part.put("text", text);
+                content.put(part);
+            }
+            if (receipts != null) {
+                for (String id : receipts) {
+                    if (id == null || id.isEmpty()) continue;
+                    JSONObject part = new JSONObject();
+                    part.put("type", "file");
+                    part.put("receiptId", id);
+                    content.put(part);
+                }
+            }
+            if (content.length() == 0) return Result.fail("没有可发的内容");
             req.put("sessionId", sessionId);
             req.put("requestId", UUID.randomUUID().toString());
             req.put("mode", "queue");

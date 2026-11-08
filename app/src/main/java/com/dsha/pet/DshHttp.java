@@ -188,11 +188,14 @@ public final class DshHttp {
         public final int status;
         public final String head;
         public final String body;
+        /** 原始字节。文本接口用 body，二进制接口（/api/file、上传）用这个。 */
+        public final byte[] bytes;
 
-        Resp(int status, String head, String body) {
+        Resp(int status, String head, byte[] bytes) {
             this.status = status;
             this.head = head;
-            this.body = body;
+            this.bytes = bytes == null ? new byte[0] : bytes;
+            this.body = new String(this.bytes, java.nio.charset.StandardCharsets.UTF_8);
         }
 
         /** 取响应头（小写匹配），没有返回 null。 */
@@ -254,6 +257,30 @@ public final class DshHttp {
 
     public static Resp fetch(String method, String url, String body) throws Exception {
         return fetch(method, url, body, DEFAULT_CT, 3000, 6000);
+    }
+
+    /**
+     * 二进制入口：请求体是原始字节，响应的 body 也当字节看（下载文件、上传图片走这条）。
+     * 两层认证的重试逻辑跟 {@link #fetch} 完全一致。
+     */
+    public static Resp fetchBytes(String method, String url, byte[] body, String contentType,
+                                  int connectMs, int readMs) throws Exception {
+        Resp r = onceRawBytes(method, url, body, contentType, connectMs, readMs);
+        if (r == null) return null;
+        if (r.status >= 300 && r.status < 400) {
+            String loc = r.header("location");
+            if (loc != null && loc.contains(LOGIN_PATH)) {
+                if (login(url, connectMs, readMs)) {
+                    r = onceRawBytes(method, url, body, contentType, connectMs, readMs);
+                }
+            }
+        }
+        if (r != null && r.status == 401) {
+            if (ensureDshAuth(url, connectMs, readMs)) {
+                r = onceRawBytes(method, url, body, contentType, connectMs, readMs);
+            }
+        }
+        return r;
     }
 
     // ------------------------------------------------------------------
@@ -372,6 +399,16 @@ public final class DshHttp {
      */
     private static Resp onceRaw(String method, String url, String body, String contentType,
                                 int connectMs, int readMs) throws Exception {
+        return onceRawBytes(method, url,
+                body == null ? null : body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                contentType, connectMs, readMs);
+    }
+
+    /**
+     * 与 onceRaw 同构，但请求体是原始字节（发图片/附件要 stream 上去，不能当字符串处理）。
+     */
+    static Resp onceRawBytes(String method, String url, byte[] bb, String contentType,
+                             int connectMs, int readMs) throws Exception {
         URL u = new URL(url);
         String scheme = u.getProtocol() == null ? "http" : u.getProtocol().toLowerCase(Locale.US);
         int defaultPort = "https".equals(scheme) ? 443 : 80;
@@ -391,7 +428,6 @@ public final class DshHttp {
             req.append("User-Agent: dsh-pet-android\r\n");
             String ck = cookieHeader();
             if (ck != null) req.append("Cookie: ").append(ck).append("\r\n");
-            byte[] bb = body == null ? null : body.getBytes("UTF-8");
             if (bb != null) {
                 req.append("Content-Type: ").append(contentType).append("\r\n");
                 req.append("Content-Length: ").append(bb.length).append("\r\n");
@@ -412,7 +448,7 @@ public final class DshHttp {
             int status = parseStatus(head);
             String lowHead = head.toLowerCase(Locale.US);
             if (lowHead.contains("transfer-encoding: chunked")) payload = dechunkBytes(payload);
-            return new Resp(status, head, new String(payload, "UTF-8"));
+            return new Resp(status, head, payload);
         } finally {
             try {
                 s.close();
@@ -557,7 +593,8 @@ public final class DshHttp {
         return out.toByteArray();
     }
 
-    private static String enc(String v) {
+    /** URL 编码（/api/file 的 path、上传的文件名都要用它）。 */
+    public static String enc(String v) {
         try {
             return java.net.URLEncoder.encode(v, "UTF-8");
         } catch (Exception e) {
