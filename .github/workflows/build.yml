@@ -21,9 +21,14 @@ jobs:
       - name: Install platform + build-tools
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME" || true
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            export ANDROID_HOME=/usr/local/lib/android/sdk
+            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          fi
+          SDKM=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)
+          echo "sdkmanager=$SDKM"
+          [ -n "$SDKM" ] || { echo "sdkmanager not found" >&2; exit 1; }
+          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0"
           ls "$ANDROID_HOME/build-tools/34.0.0/lib/d8.jar"
 
       - name: Restore signing keystore
