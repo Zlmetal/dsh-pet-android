@@ -168,13 +168,21 @@ public final class DshApi {
         public boolean error;
     }
 
+    /** 一页历史的分页信息。 */
+    public static final class Page {
+        /** 还有更早的记录可以翻。 */
+        public boolean hasMore;
+        /** 这一页里最小的 seq（已经过滤掉不显示的记录），下一轮翻页用它当 beforeSeq。 */
+        public long minSeq;
+    }
+
     /**
      * 拉一页历史。
      *
-     * @param beforeSeq 只取这个 seq 之前的内容；0 表示从最新开始
+     * @param beforeSeq 只取这个 seq 之前的内容（exclusive）；0 表示从最新开始
      */
     public static Result events(String origin, String sessionId, long beforeSeq,
-                                int maxMessages, List<Msg> out, boolean[] hasMore) {
+                                int maxMessages, List<Msg> out, Page page) {
         JSONObject req = new JSONObject();
         JSONObject args = new JSONObject();
         try {
@@ -190,16 +198,24 @@ public final class DshApi {
         Result r = call(origin, "session/events", args, 4000, 30000);
         if (!r.ok) return r;
         JSONArray recs = r.value.optJSONArray("records");
+        long minSeq = 0;
         if (recs != null) {
             for (int i = 0; i < recs.length(); i++) {
                 JSONObject rec = recs.optJSONObject(i);
                 if (rec == null) continue;
-                Msg m = parseEvent(rec.optJSONObject("event"));
+                JSONObject ev = rec.optJSONObject("event");
+                // 翻页锚点要用**所有**记录的 seq（含被过滤掉的注入物），否则会重复拉
+                if (ev != null) {
+                    long sq = ev.optLong("seq", 0);
+                    if (sq > 0 && (minSeq == 0 || sq < minSeq)) minSeq = sq;
+                }
+                Msg m = parseEvent(ev);
                 if (m != null) out.add(m);
             }
         }
-        if (hasMore != null && hasMore.length > 0) {
-            hasMore[0] = r.value.optBoolean("hasMore", false);
+        if (page != null) {
+            page.hasMore = r.value.optBoolean("hasMore", false);
+            page.minSeq = minSeq;
         }
         return new Result(true, r.value, null);
     }
@@ -356,12 +372,16 @@ public final class DshApi {
         if (output != null) {
             JSONArray recs = output.optJSONArray("records");
             if (recs != null) {
+                // 注意：wait 的 output.records 是**倒序**（最新在前），跟 session/events 相反
+                List<Msg> tmp = new ArrayList<>();
                 for (int i = 0; i < recs.length(); i++) {
                     JSONObject rec = recs.optJSONObject(i);
                     if (rec == null) continue;
                     Msg m = parseEvent(rec.optJSONObject("event"));
-                    if (m != null && "assistant".equals(m.role)) out.add(m);
+                    if (m != null && "assistant".equals(m.role)) tmp.add(m);
                 }
+                java.util.Collections.reverse(tmp);
+                out.addAll(tmp);
             }
         }
         return r;

@@ -477,14 +477,11 @@ public class ChatActivity extends Activity {
             @Override
             public void run() {
                 final List<DshApi.Msg> msgs = new ArrayList<>();
-                final boolean[] more = new boolean[1];
-                final DshApi.Result r = DshApi.events(org, sid, 0, PAGE_MESSAGES, msgs, more);
+                final DshApi.Page pg = new DshApi.Page();
+                final DshApi.Result r = DshApi.events(org, sid, 0, PAGE_MESSAGES, msgs, pg);
+                // running 只是提示，读失败不影响历史显示
                 final boolean[] running = new boolean[1];
-                long[] cursor = new long[1];
-                if (r.ok && !msgs.isEmpty() && msgs.get(msgs.size() - 1).role.equals("assistant")) {
-                    // running 只是提示，失败不影响历史显示
-                    DshApi.state(org, sid, cursor, running);
-                }
+                if (r.ok) DshApi.state(org, sid, null, running);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
@@ -498,8 +495,8 @@ public class ChatActivity extends Activity {
                             addNotice("这个会话还是空的，说点什么吧。");
                             return;
                         }
-                        hasMore = more[0];
-                        oldestSeq = msgs.get(0).seq;
+                        hasMore = pg.hasMore;
+                        oldestSeq = pg.minSeq;
                         if (hasMore) feed.addView(olderButton());
                         for (DshApi.Msg m : msgs) addMsg(m);
                         if (running[0]) addTyping();
@@ -518,8 +515,8 @@ public class ChatActivity extends Activity {
             @Override
             public void run() {
                 final List<DshApi.Msg> msgs = new ArrayList<>();
-                final boolean[] more = new boolean[1];
-                final DshApi.Result r = DshApi.events(org, sid, before, PAGE_MESSAGES, msgs, more);
+                final DshApi.Page pg = new DshApi.Page();
+                final DshApi.Result r = DshApi.events(org, sid, before, PAGE_MESSAGES, msgs, pg);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
@@ -532,8 +529,8 @@ public class ChatActivity extends Activity {
                         if (first != null && "older".equals(String.valueOf(first.getTag()))) {
                             feed.removeViewAt(0);
                         }
-                        hasMore = more[0];
-                        if (!msgs.isEmpty()) oldestSeq = msgs.get(0).seq;
+                        hasMore = pg.hasMore;
+                        if (pg.minSeq > 0) oldestSeq = pg.minSeq;
                         int at = 0;
                         if (hasMore) {
                             feed.addView(olderButton(), 0);
