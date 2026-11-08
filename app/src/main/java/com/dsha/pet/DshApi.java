@@ -262,19 +262,10 @@ public final class DshApi {
             return m;
         }
 
-        if ("tool/result".equals(type) && data != null) {
-            JSONObject msg = data.optJSONObject("message");
-            if (msg == null) return null;
-            String text = textOf(msg.optJSONArray("content"));
-            if (text == null || text.trim().isEmpty()) return null;
-            if (text.length() > 600) text = text.substring(0, 600) + "…";
-            Msg m = new Msg();
-            m.role = "tool";
-            m.text = text.trim();
-            m.seq = seq;
-            m.time = time;
-            m.error = msg.optBoolean("isError", false);
-            return m;
+        // tool/result 不显示：手机屏小，一条 send_meme 的候选清单就能糊满整屏
+        // （十几行「[表情: …] 描述」），对读对话没有任何帮助。只保留人和鱼的正文。
+        if ("tool/result".equals(type)) {
+            return null;
         }
         return null;
     }
