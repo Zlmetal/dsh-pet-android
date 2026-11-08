@@ -855,7 +855,8 @@ public class ChatActivity extends Activity {
         chip.setPadding(dp(12), dp(9), dp(12), dp(9));
         GradientDrawable g = new GradientDrawable();
         g.setCornerRadius(dp(14));
-        g.setColor(mine ? 0x33FFFFFF : 0xFFFFFFFF);
+        // 自己发的附件也在浅底上，用淡紫卡片；白字在浅底上看不见
+        g.setColor(mine ? 0xFFEFEBFA : 0xFFFFFFFF);
         chip.setBackground(g);
 
         TextView icon = new TextView(this);
@@ -870,7 +871,7 @@ public class ChatActivity extends Activity {
         TextView nm = new TextView(this);
         nm.setText(p.name == null || p.name.isEmpty() ? "附件" : p.name);
         nm.setTextSize(13);
-        nm.setTextColor(mine ? 0xFFFFFFFF : 0xFF3B3A5C);
+        nm.setTextColor(0xFF3B3A5C);
         nm.setSingleLine(true);
         nm.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         texts.addView(nm);
@@ -879,7 +880,7 @@ public class ChatActivity extends Activity {
         meta.setText(p.kind == DshApi.Part.PRESENTED ? "点一下下载"
                 : ("点一下下载" + (p.bytes > 0 ? " · " + sizeText(p.bytes) : "")));
         meta.setTextSize(10);
-        meta.setTextColor(mine ? 0xD9FFFFFF : 0xFF9A97B8);
+        meta.setTextColor(0xFF9A97B8);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         mlp.topMargin = dp(2);
