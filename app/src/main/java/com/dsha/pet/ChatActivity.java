@@ -876,14 +876,10 @@ public class ChatActivity extends Activity {
         nm.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         texts.addView(nm);
 
-        // 老的非图片附件服务端读不出来了，先说清楚，别让人点了才失望
-        boolean stale = p.kind == DshApi.Part.FILE && p.attachment != null
-                && (p.localUri == null || p.localUri.isEmpty());
-        TextView meta = new TextView(this);
-        meta.setText(stale ? "历史附件已不可取，重发一次才能下"
-                : ("点一下下载" + (p.bytes > 0 ? " · " + sizeText(p.bytes) : "")));
+        final String key = dlKey(p);
+        final TextView meta = new TextView(this);
         meta.setTextSize(10);
-        meta.setTextColor(0xFF9A97B8);
+        refreshMeta(meta, p, key);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         mlp.topMargin = dp(2);
@@ -893,15 +889,126 @@ public class ChatActivity extends Activity {
         chip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                downloadPart(p);
+                // 下过一次就存着：再点直接拿本地那份去开会，不再走网络
+                Uri local = savedUri(key);
+                if (local != null) {
+                    openSaved(key, local, meta);
+                    return;
+                }
+                downloadPart(p, key, meta);
             }
         });
         rowLine.addView(chip);
         return rowLine;
     }
 
+    /** 附件卡片第二行的说明：没下过写大小，下过就写「已下载 · 点一下打开」。 */
+    private void refreshMeta(TextView meta, DshApi.Part p, String key) {
+        if (meta == null) return;
+        boolean stale = p.kind == DshApi.Part.FILE && p.attachment != null
+                && (p.localUri == null || p.localUri.isEmpty());
+        if (savedUri(key) != null) {
+            meta.setText("已下载 · 点一下打开");
+            meta.setTextColor(0xFF7C6BD6);
+        } else if (stale) {
+            meta.setText("历史附件已不可取，重发一次才能下");
+            meta.setTextColor(0xFF9A97B8);
+        } else {
+            meta.setText("点一下下载" + (p.bytes > 0 ? " · " + sizeText(p.bytes) : ""));
+            meta.setTextColor(0xFF9A97B8);
+        }
+    }
+
+    /**
+     * 一份附件在本地落盘后的记号：同一个附件只下一次，再点就是打开。
+     * 优先用 sha256 / attachmentId，present 文件用绝对路径，本地原件用 Uri。
+     */
+    private static String dlKey(DshApi.Part p) {
+        if (p == null) return "";
+        if (p.localUri != null && !p.localUri.isEmpty()) return "u:" + p.localUri;
+        if (p.kind == DshApi.Part.PRESENTED) return "p:" + p.path;
+        if (p.attachment != null) {
+            String id = p.attachment.optString("attachmentId", "");
+            if (id.isEmpty()) id = p.attachment.optString("sha256", "");
+            if (!id.isEmpty()) return "a:" + id;
+        }
+        return "n:" + (p.name == null ? "" : p.name) + ":" + p.bytes;
+    }
+
+    private static String K_DL = "dl:";
+
+    /** 已经下过就返回本地 Uri，没下过返回 null。 */
+    private Uri savedUri(String key) {
+        if (key == null || key.isEmpty()) return null;
+        String v = getSharedPreferences(PREFS, MODE_PRIVATE).getString(K_DL + key, null);
+        if (v == null) return null;
+        String[] f = v.split("\n", 3);
+        if (f.length < 1 || f[0].isEmpty()) return null;
+        Uri u = Uri.parse(f[0]);
+        // 文件被用户在系统里删了就当没下过，重新拉一次
+        try {
+            if ("file".equals(u.getScheme())) {
+                if (f[0].startsWith("file://") && new File(u.getPath()).exists()) return u;
+                if (!f[0].contains("://") && new File(f[0]).exists()) return Uri.fromFile(new File(f[0]));
+                return null;
+            }
+            InputStream in = getContentResolver().openInputStream(u);
+            if (in == null) return null;
+            in.close();
+            return u;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void rememberSaved(String key, Uri uri, String name, String mime) {
+        if (key == null || key.isEmpty() || uri == null) return;
+        String v = uri.toString() + "\n" + (name == null ? "" : name) + "\n" + (mime == null ? "" : mime);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(K_DL + key, v).apply();
+    }
+
+    private void forgetSaved(String key) {
+        if (key == null || key.isEmpty()) return;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(K_DL + key).apply();
+    }
+
+    /** 已经下过：直接交给系统里能打开它的 App，不再重新下载。 */
+    private void openSaved(String key, Uri uri, TextView meta) {
+        String mime = null;
+        String name = null;
+        String v = getSharedPreferences(PREFS, MODE_PRIVATE).getString(K_DL + key, null);
+        if (v != null) {
+            String[] f = v.split("\n", 3);
+            if (f.length > 2) mime = f[2];
+            if (f.length > 1) name = f[1];
+        }
+        if (mime == null || mime.isEmpty()) mime = mimeOf(name);
+        Intent i = new Intent(Intent.ACTION_VIEW);
+        i.setDataAndType(uri, mime);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            // 没有 App 认这个类型，就退回「用系统解析器选」
+            try {
+                startActivity(Intent.createChooser(
+                        new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "*/*")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                        "打开 " + (name == null ? "文件" : name)));
+            } catch (Exception e2) {
+                // 真的没有能开的，就说清楚并允许重下一次
+                forgetSaved(key);
+                Toast.makeText(this, "没找到能打开 "
+                        + (name == null ? "它" : name) + " 的 App", Toast.LENGTH_LONG).show();
+                if (meta != null) {
+                    meta.setText("没 App 能打开 · 点一下重新下载");
+                }
+            }
+        }
+    }
+
     /** 点附件：把它拉到本地 Downloads 里，成功/失败都给一句人话。 */
-    private void downloadPart(final DshApi.Part p) {
+    private void downloadPart(final DshApi.Part p, final String key, final TextView meta) {
         final String org = origin();
         final String sid = currentId;
         if (sid == null) return;
@@ -926,18 +1033,24 @@ public class ChatActivity extends Activity {
                         && p.kind != DshApi.Part.IMAGE;
                 final String name = (p.name == null || p.name.isEmpty())
                         ? ("dsh-" + System.currentTimeMillis()) : p.name;
-                final String where = data == null ? null : saveToDownloads(name, p.mediaType, data);
+                final Saved saved = data == null ? null : saveToDownloads(name, p.mediaType, data);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (where == null) {
+                        if (saved == null) {
                             Toast.makeText(ChatActivity.this,
                                     noSource ? "这份老附件服务端不给读，重新发一次就能下"
                                             : "下载失败，检查一下 DSH 连接",
                                     Toast.LENGTH_LONG).show();
                         } else {
+                            // 记下来，下次点同一份就不再走网络，直接交给系统打开
+                            rememberSaved(key, saved.uri, name, p.mediaType);
                             Toast.makeText(ChatActivity.this,
-                                    "已保存到 " + where, Toast.LENGTH_LONG).show();
+                                    "已保存到 " + saved.where, Toast.LENGTH_LONG).show();
+                            if (meta != null) {
+                                meta.setText("已下载 · 点一下打开");
+                                meta.setTextColor(0xFF7C6BD6);
+                            }
                         }
                     }
                 });
@@ -945,13 +1058,19 @@ public class ChatActivity extends Activity {
         }).start();
     }
 
+    /** 落盘结果：留给用户看的位置 + 下次直接打开用的 Uri。 */
+    private static final class Saved {
+        Uri uri;
+        String where;
+    }
+
     /**
      * 落盘。Android 10 起走 MediaStore 的 Downloads（不需要存储权限），
      * 更老的系统只能放应用自己的外部目录。
      *
-     * @return 人能看懂的位置，失败返回 null
+     * @return 失败返回 null
      */
-    private String saveToDownloads(String name, String mime, byte[] data) {
+    private Saved saveToDownloads(String name, String mime, byte[] data) {
         String type = (mime == null || mime.isEmpty()) ? mimeOf(name) : mime;
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -969,7 +1088,10 @@ public class ChatActivity extends Activity {
                 } finally {
                     os.close();
                 }
-                return "下载/" + name;
+                Saved s = new Saved();
+                s.uri = uri;
+                s.where = "下载/" + name;
+                return s;
             }
             File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
             if (dir == null) dir = getFilesDir();
@@ -982,7 +1104,10 @@ public class ChatActivity extends Activity {
             } finally {
                 fos.close();
             }
-            return f.getAbsolutePath();
+            Saved s = new Saved();
+            s.uri = Uri.fromFile(f);
+            s.where = f.getAbsolutePath();
+            return s;
         } catch (Exception e) {
             return null;
         }
