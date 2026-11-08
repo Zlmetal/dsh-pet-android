@@ -516,6 +516,9 @@ public class MainActivity extends Activity {
                     r = dshAlive ? "DSH 在跑，但桌宠插件没加载" : "未找到 DSH";
                 }
                 final String rr = r;
+                // 结果同时写回 PetService.lastPoll：界面每秒按它刷新，
+                // 只 setDsh() 的话 1 秒后就被 PetService 里的默认值盖回去。
+                PetService.lastPoll = rr;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {

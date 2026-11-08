@@ -274,10 +274,51 @@ public final class DshHttp {
     // 底层
     // ------------------------------------------------------------------
 
-    /** 建连；https 用系统信任库并做主机名校验（裸 SSLSocket 默认不校验主机名）。 */
+    /**
+     * 建连；https 用系统信任库并做主机名校验（裸 SSLSocket 默认不校验主机名）。
+     *
+     * 域名可能同时有 A 和 AAAA 记录，而不少网络里 IPv6 有记录但不通（运营商没给前缀、
+     * 或者路由被挡）。new InetSocketAddress(host, port) 只会用解析出来的第一个地址，
+     * 撞上不通的那个就白等一个 connect 超时。这里把全部地址拿出来，IPv4 排前面挨个试。
+     */
     private static Socket open(String scheme, String host, int port, int connectMs) throws Exception {
-        Socket raw = new Socket();
-        raw.connect(new InetSocketAddress(host, port), connectMs);
+        java.net.InetAddress[] addrs;
+        try {
+            addrs = java.net.InetAddress.getAllByName(host);
+        } catch (Exception e) {
+            addrs = new java.net.InetAddress[0];
+        }
+        if (addrs.length == 0) {
+            throw new java.net.UnknownHostException("解析不到 " + host);
+        }
+        // IPv4 优先：v4 不通的概率远低于 v6
+        java.util.List<java.net.InetAddress> order = new java.util.ArrayList<>();
+        for (java.net.InetAddress a : addrs) {
+            if (a instanceof java.net.Inet4Address) order.add(a);
+        }
+        for (java.net.InetAddress a : addrs) {
+            if (!(a instanceof java.net.Inet4Address)) order.add(a);
+        }
+        Exception last = null;
+        Socket raw = null;
+        for (int i = 0; i < order.size(); i++) {
+            java.net.InetAddress a = order.get(i);
+            Socket s = new Socket();
+            try {
+                int ms = i == order.size() - 1 ? connectMs : Math.min(connectMs, 6000);
+                s.connect(new InetSocketAddress(a, port), ms);
+                raw = s;
+                last = null;
+                break;
+            } catch (Exception e) {
+                last = e;
+                try {
+                    s.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (raw == null) throw last != null ? last : new java.net.ConnectException("连不上 " + host);
         if (!"https".equals(scheme)) return raw;
         try {
             SSLSocketFactory f = (SSLSocketFactory) SSLSocketFactory.getDefault();
