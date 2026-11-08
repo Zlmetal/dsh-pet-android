@@ -52,10 +52,6 @@ import java.io.FileWriter;
 import java.io.InputStream;
 import java.util.Locale;
 import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.Socket;
-import java.net.InetSocketAddress;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -317,6 +313,7 @@ public class PetService extends Service {
     public void onCreate() {
         super.onCreate();
         running = true;
+        DshHttp.init(this);
         float d = getResources().getDisplayMetrics().density;
         ui = new Handler(Looper.getMainLooper());
         net = Executors.newCachedThreadPool();
@@ -1605,65 +1602,23 @@ public class PetService extends Service {
         return rawRequest("POST", url, body);
     }
 
-    /** 裸 Socket HTTP/1.1：绕过 OkHttp 连接池，避免复用到已被服务端关掉的旧连接。 */
+    /** 统一出口：TLS / access-gate Cookie / 302 自动重登都交给 DshHttp。 */
     private static String rawRequest(String method, String url, String body) throws Exception {
-        URL u = new URL(url);
-        String host = u.getHost();
-        int port = u.getPort() < 0 ? 80 : u.getPort();
-        String path = u.getFile();
-        Socket s = new Socket();
-        try {
-            s.connect(new InetSocketAddress(host, port), 2000);
-            s.setSoTimeout(4000);
-            StringBuilder req = new StringBuilder();
-            req.append(method).append(' ').append(path).append(" HTTP/1.1\r\n");
-            req.append("Host: ").append(host).append(':').append(port).append("\r\n");
-            req.append("Connection: close\r\n");
-            req.append("Accept: */*\r\n");
-            req.append("User-Agent: dsh-pet-android\r\n");
-            byte[] bb = body == null ? null : body.getBytes("UTF-8");
-            if (bb != null) {
-                req.append("Content-Type: application/json; charset=utf-8\r\n");
-                req.append("Content-Length: ").append(bb.length).append("\r\n");
+        DshHttp.Resp r = DshHttp.fetch(method, url, body, 3000, 6000);
+        if (r == null) return null;
+        if (r.status != 200) {
+            if (r.status == 401) {
+                DshHttp.lastAuthError = "DSH 需要重新打开带 token 的地址（服务端重启过）";
+            } else if (r.status == 302 || r.status == 303) {
+                String loc = r.header("location");
+                if (loc != null && loc.startsWith("/-/auth/login")) {
+                    DshHttp.lastAuthError = DshHttp.lastAuthError != null
+                            ? DshHttp.lastAuthError : "访问被拦，未登录";
+                }
             }
-            req.append("\r\n");
-            OutputStream os = s.getOutputStream();
-            os.write(req.toString().getBytes("UTF-8"));
-            if (bb != null) os.write(bb);
-            os.flush();
-            InputStream in = s.getInputStream();
-            ByteArrayOutputStream all = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            int n;
-            while ((n = in.read(buf)) > 0) all.write(buf, 0, n);
-            String resp = all.toString("UTF-8");
-            int idx = resp.indexOf("\r\n\r\n");
-            if (idx < 0) return null;
-            String head = resp.substring(0, idx).toLowerCase(Locale.US);
-            String payload = resp.substring(idx + 4);
-            if (!head.startsWith("http/1.1 200") && !head.startsWith("http/1.0 200")) return null;
-            if (head.contains("transfer-encoding: chunked")) payload = dechunk(payload);
-            return payload;
-        } finally {
-            try { s.close(); } catch (Exception ignored) {}
+            return null;
         }
-    }
-
-    private static String dechunk(String s) {
-        StringBuilder out = new StringBuilder();
-        int i = 0;
-        while (i < s.length()) {
-            int e = s.indexOf("\r\n", i);
-            if (e < 0) break;
-            int size;
-            try { size = Integer.parseInt(s.substring(i, e).trim(), 16); } catch (Exception x) { break; }
-            if (size == 0) break;
-            int from = e + 2;
-            int to = Math.min(s.length(), from + size);
-            out.append(s, from, to);
-            i = to + 2;
-        }
-        return out.toString();
+        return r.body;
     }
 
     private void handleState(String body) throws Exception {

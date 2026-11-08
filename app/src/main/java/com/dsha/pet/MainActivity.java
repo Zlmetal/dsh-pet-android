@@ -48,6 +48,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DshHttp.init(this);
 
         ScrollView sv = new ScrollView(this);
         sv.setFillViewport(true);
@@ -488,7 +489,7 @@ public class MainActivity extends Activity {
                 String r;
                 DshEndpoint cached = DshEndpoint.cached(MainActivity.this);
                 DshEndpoint found = null;
-                if (cached != null && DshEndpoint.probe(cached.host, cached.port, 600, 1200)) {
+                if (cached != null && DshEndpoint.probe(cached.host, cached.port, cached.scheme, 8000, 12000)) {
                     found = cached;
                 }
                 if (found == null) {
@@ -531,47 +532,34 @@ public class MainActivity extends Activity {
         box.setPadding(dp(22), dp(10), dp(22), 0);
 
         String m = DshEndpoint.getManual(this);
-        String hostStr = "127.0.0.1";
-        String portStr = String.valueOf(DshEndpoint.DEFAULT_PORT);
-        if (m != null && m.contains(":")) {
-            String[] parts = m.split(":", 2);
-            hostStr = parts[0];
-            portStr = parts[1];
-        }
+        String urlStr = m == null ? "" : m;
 
-        EditText host = new EditText(this);
-        host.setHint("主机，如 127.0.0.1");
-        host.setText(hostStr);
-        host.setInputType(InputType.TYPE_CLASS_TEXT);
-        box.addView(host);
+        EditText addr = new EditText(this);
+        addr.setHint("https://dsh.example.com 或 127.0.0.1:38859");
+        addr.setText(urlStr);
+        addr.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        box.addView(addr);
 
-        EditText port = new EditText(this);
-        port.setHint("端口，如 38859");
-        port.setText(portStr);
-        port.setInputType(InputType.TYPE_CLASS_NUMBER);
-        box.addView(port);
+        EditText pass = new EditText(this);
+        pass.setHint("DSH 访问密码（没有就留空）");
+        String saved = DshHttp.password();
+        if (saved != null) pass.setText(saved);
+        pass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        box.addView(pass);
 
         new AlertDialog.Builder(this)
-                .setTitle("手动指定 DSH 地址")
-                .setMessage("留空主机或点「清除」可恢复自动查找。")
+                .setTitle("DSH 地址")
+                .setMessage("远程填完整地址（含 https://）。留空地址可恢复自动查找。")
                 .setView(box)
                 .setPositiveButton("保存并检测", (d, w) -> {
-                    try {
-                        int p = Integer.parseInt(port.getText().toString().trim());
-                        String h = host.getText().toString().trim();
-                        if (h.isEmpty()) {
-                            DshEndpoint.setManual(this, null, 0);
-                        } else {
-                            DshEndpoint.setManual(this, h, p);
-                        }
-                        PetService.requestRediscover();
-                        setDsh("已保存，正在检测…");
-                    } catch (Exception e) {
-                        setDsh("端口格式不对");
-                    }
+                    DshHttp.setPassword(pass.getText().toString());
+                    DshEndpoint.setManual(this, addr.getText().toString());
+                    PetService.requestRediscover();
+                    setDsh("已保存，正在检测…");
                 })
                 .setNeutralButton("清除", (d, w) -> {
-                    DshEndpoint.setManual(this, null, 0);
+                    DshEndpoint.setManual(this, (String) null);
+                    DshHttp.setPassword("");
                     PetService.requestRediscover();
                     setDsh("已清除手动端点");
                 })
