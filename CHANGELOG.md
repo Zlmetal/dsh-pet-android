@@ -2,6 +2,56 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；`versionCode` 从 1.0 起每发一版递增 1（3.x 系列为 `versionCode = 21 + y`，4.x 为 `29 + x`，5.0 为 35，5.1 为 36，5.2 为 37，5.3 为 38，5.3.1 为 39，5.4 为 40；1.0.0.1 起 `versionCode = 10001`）。
 
+## [1.0.0.16] - 2026-11-08
+
+本版是本仓库（`dsh-pet-android-remote`）的**首个正式版**，覆盖 1.0.0.2 → 1.0.0.16 的全部改动。底部 1.0.0.1 及更早的条目属于上游 `gqpG10/dsh-pet-android`。
+
+### 新增
+
+- **远程 DSH 支持**：`DshEndpoint` 支持完整 URL（`http://` / `https://`，含非默认端口），TLS 走 `SSLSocket`；`MainActivity` 的手动填写对话框增加「访问密码」输入框。
+- **dsh-access-gate 密码登录**：`DshHttp` 自动 `POST /-/auth/login` 换 `dsh_gate_token`，再从 302 的 `Location` 里捞 launch token、`GET /?token=…` 换 DSH 自己的 `dsh-auth-<hash>`；两个 cookie 一起带。7 天过期后检测到 302 自动重登；`/api` 回 401 时补一次 `dsh-auth` 再重试。
+- **App 内对话界面**：新增 `ChatActivity`（约 1575 行）与 `DshApi`（约 593 行），走 DSH 的 `/api` 而不是插件私有的 `/chat`，因此能看到网页端真实会话。左侧会话抽屉按工作区分组、组头可折叠，顶栏「≡」「新」在左、标题居中、「关闭」在最右；历史分页加载；发消息后用 `session/wait` 阻塞到本轮结束。
+- **图片与附件收发**：回复里的图片直接显示、可点开大图；`present` 的文件做成附件卡片，默认不下载，点一下才存到 `下载/`；输入框左边「＋」可发图片或附件（单次 ≤ 24 MB）。
+- 会话抽屉展示工作区分组与折叠状态；`sideNotice` 提示行在真消息进来时自动清除。
+
+### 修复
+
+- **chunked 响应按字符切分导致 JSON 截断（严重）**：`DshHttp.readAll()` 先转 `String` 再按字符下标解 `Transfer-Encoding: chunked`，而 chunk 长度是字节数；中文一字三字节，32768 字节的块只切出 32768 个字符，JSON 断在中间，报 `Unterminated object at character 32768`，会话抽屉读不出来、聊天区把整坨原始 JSON 当消息渲染。现在整条链路改为全字节流（`readAllBytes` → 按字节找 `CRLFCRLF` → `dechunkBytes`），单次读取上限从 1 MB 提到 4 MB。
+- **`new String(bytes, "ISO-8859-1")` 抛受检异常**导致 CI 编译失败（`error: unreported exception UnsupportedEncodingException`），改用 `StandardCharsets.ISO_8859_1`。
+- **端点握手 IPv6 优先**：域名同时解析出连不通的 IPv6 时会傻等超时，表现为「浏览器能打开，App 显示未运行」。改为 `getAllByName` 取全部地址、IPv4 优先、逐个尝试。
+- **测试连接结果被覆盖**：`MainActivity.testDsh()` 的结果没写回 `PetService.lastPoll`，界面每秒刷新又把它盖成默认的「未运行」。
+- **`/api/file` 的 302 缓存跳转**：服务端先 302 到带 `v` 的缓存地址，之前没跟这一层，导致附件读不到。
+- **非图片附件走了图片接口**：图片预览逻辑对任何附件都尝试解码，非图片进不去也报错，现在按 `mediaType` 分流。
+- **自己刚发的图/附件**：服务端回图有延迟，先挂本地 Uri 立刻画出来；附件点下载时也优先读本地源。
+- **历史老附件**：服务端已不给读时，卡片明说「历史附件已不可取，重发一次才能下」，不再让人点半天没反应。
+- **翻页锚点**：改用未过滤的最小 `seq`；`session/wait` 返回的结果倒序还原。
+- 纯表情消息整条跳过，`[表情: …]` 标记不再原样露在手机上（App 没有表情包通道）。
+- 有消息时清掉「这个会话还是空的，说点什么吧。」提示。
+
+### 变更
+
+- **去掉 DSHA 依赖**：菜单不再有「打开 DSH」「获取 DSHA ↓」，也不再检测 `dsh.android.client`；双击改为打开对话；没连上时菜单给「设置 DSH 地址与密码」。
+- **去掉「赞赏作者 ♥」**：本改版不设收款入口，`showDonate()` 一并删除。
+- 主界面新增「跟大肥鱼聊天」主按钮；玩法说明里的「双击 —— 打开 DSHA」改为「双击 —— 跟大肥鱼聊天」。
+- 聊天只渲染最终结果：`reasoning` / `tool-call` / `tool-result` / `step` 全部丢弃。
+- 版本号 `1.0.0.2` → `1.0.0.16`（`versionCode` 10002 → 10016）。
+- 仓库更名 `dsh-pet-android` → `dsh-pet-android-remote`，README 重写，补上与原版插件、上游 fork 的关系说明。
+
+## [1.0.0.3] - 2026-11-08
+
+### 新增
+
+- 远程 DSH（https + access-gate 密码登录 + cookie 自动重登）。
+- 安卓端自带对话界面；双击改为打开对话；去掉赞赏作者与 DSHA 依赖。
+
+## [1.0.0.2] - 2026-11-08
+
+### 修复
+
+- 端点握手改为 IPv4 优先、逐个地址尝试，修「域名解析到不可达 IPv6 导致一直未运行」。
+- `testDsh()` 结果写回 `PetService.lastPoll`，不再被每秒刷新覆盖。
+- 认证失败原因透传到界面；重新发现端点时清空上次错误。
+
 ## [1.0.0.1] - 2026-10-31
 
 ### 变更
