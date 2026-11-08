@@ -32,8 +32,6 @@ public final class DshEndpoint {
     /** dsh-pet 插件固定的路由前缀（见插件源码 ROUTE_PREFIX）。 */
     public static final String PATH = "/dsh-pet-7340";
     public static final int DEFAULT_PORT = 38859;
-    /** 上次全端口扫描时间，避免短时间内反复空扫。 */
-    private static volatile long lastFullScanAt = 0;
     /** 最近一次扫描中“端口开着但不是 DSH”的提示，供界面显示。 */
     public static volatile String lastHint = null;
     private static final Set<Integer> openPorts = java.util.Collections.synchronizedSet(new LinkedHashSet<Integer>());
@@ -102,10 +100,10 @@ public final class DshEndpoint {
     }
 
     /**
-     * 阻塞解析端点。deep=true 时扫描 1024-65535 全端口，否则只扫常见动态端口段。
+     * 阻塞解析端点：先手动端点，再上次缓存，最后扫常见动态端口段。
      * 必须放在后台线程调用。
      */
-    public static DshEndpoint resolveBlocking(Context ctx, boolean deep, Listener l) {
+    public static DshEndpoint resolveBlocking(Context ctx, Listener l) {
         SharedPreferences sp = prefs(ctx);
 
         lastHint = null;
@@ -161,24 +159,7 @@ public final class DshEndpoint {
             return hit;
         }
 
-        // 4) 全量兜底：手动深度查找，或自动兜底（10 分钟内只做一次，避免反复空扫）
-        boolean full = deep || (System.currentTimeMillis() - lastFullScanAt > 10 * 60 * 1000L);
-        if (full) {
-            lastFullScanAt = System.currentTimeMillis();
-            Set<Integer> rest = new LinkedHashSet<>();
-            for (int p = 1024; p <= 65535; p++) {
-                if (p >= 30000 && p <= 61000) continue;
-                rest.add(p);
-            }
-            progress(l, "深度扫描剩余端口（" + rest.size() + " 个）…");
-            hit = scan(new ArrayList<>(rest), "127.0.0.1");
-            if (hit == null) hit = scan(new ArrayList<>(rest), "::1");
-            if (hit != null) {
-                save(sp, hit);
-                return hit;
-            }
-        }
-        // 5) 扫完仍没有：看看是不是 DSH 起着但插件没加载
+        // 4) 扫完仍没有：看看是不是 DSH 起着但插件没加载
         for (int p : new ArrayList<>(openPorts)) {
             if (looksLikeDsh("127.0.0.1", p) || looksLikeDsh("::1", p)) {
                 lastHint = "DSH 在运行，但桌宠插件没加载（端口 " + p + "）";

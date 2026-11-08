@@ -114,6 +114,19 @@ public class ChatActivity extends Activity {
         String mime;
     }
 
+    /** 前台时置位，悬浮窗双击据此只提示、不再叠一层对话。 */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        PetService.chatOpen = true;
+    }
+
+    @Override
+    protected void onPause() {
+        PetService.chatOpen = false;
+        super.onPause();
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -282,6 +295,19 @@ public class ChatActivity extends Activity {
         if (cute != null) t.setTypeface(cute);
         head.addView(t, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // 窄屏上抽屉会盖住顶栏，所以把开合与新会话也放一份到这里
+        head.addView(barBtn("≡", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleSidebar();
+            }
+        }));
+        head.addView(barBtn("新", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                newSession();
+            }
+        }));
         head.addView(barBtn("刷新", new View.OnClickListener() {
             @Override
             public void onClick(View v) {

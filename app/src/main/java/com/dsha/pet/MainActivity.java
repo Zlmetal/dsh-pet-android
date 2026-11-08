@@ -193,18 +193,6 @@ public class MainActivity extends Activity {
         epBtns.addView(manualBtn, manualLp);
         root.addView(epBtns, matchTop(dp(12)));
 
-        TextView deepBtn = pill("深度查找（全端口，较慢）", 0xFF7B6BB5, false);
-        deepBtn.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("深度查找")
-                .setMessage("会扫描 1024–65535 全部端口，通常 10–40 秒。只在自动查找失败时使用。")
-                .setPositiveButton("开始", (d, w) -> {
-                    PetService.requestDeepScan();
-                    setDsh("深度查找中…");
-                })
-                .setNegativeButton("取消", null)
-                .show());
-        root.addView(deepBtn, matchTop(dp(10)));
-
         TextView batt = pill(batteryText(), 0xFF7B6BB5, false);
         batt.setOnClickListener(v -> requestIgnoreBattery(batt));
         root.addView(batt, matchTop(dp(10)));
@@ -411,7 +399,7 @@ public class MainActivity extends Activity {
                     found = cached;
                 }
                 if (found == null) {
-                    found = DshEndpoint.resolveBlocking(MainActivity.this, false,
+                    found = DshEndpoint.resolveBlocking(MainActivity.this,
                             new DshEndpoint.Listener() {
                                 @Override
                                 public void onProgress(final String message) {

@@ -62,19 +62,17 @@ public class PetService extends Service {
     public static volatile String lastPoll = "未运行";
     /** 端点状态，供主界面显示。 */
     public static volatile String discoveryStatus = "未检测";
-    /** 由主界面触发重新发现 / 深度扫描。 */
+    /** 由主界面触发重新发现。 */
     public static volatile boolean rediscoverRequested = false;
-    public static volatile boolean deepScanRequested = false;
     /** 服务是否在运行，供主界面判断按钮行为。 */
     public static volatile boolean running = false;
+    /** 对话页是否已经打开（ChatActivity 维护），避免双击叠第二层。 */
+    public static volatile boolean chatOpen = false;
 
     public static void requestRediscover() {
         rediscoverRequested = true;
     }
 
-    public static void requestDeepScan() {
-        deepScanRequested = true;
-    }
     private static final String DSHA_PKG = "dsh.android.client";
 
     private WindowManager wm;
@@ -1466,6 +1464,10 @@ public class PetService extends Service {
 
     /** 打开自带的对话界面（双击 / 菜单「对话」都走这里）。 */
     private void openChat() {
+        if (chatOpen) {
+            showBubble("已进对话，不要一直戳啦~", 2000);
+            return;
+        }
         try {
             Intent i = new Intent(this, ChatActivity.class);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -1532,24 +1534,15 @@ public class PetService extends Service {
                 sleepQuiet(2000);
                 continue;
             }
-            boolean deep = false;
             if (rediscoverRequested) {
                 rediscoverRequested = false;
                 ep = null;
                 pollFails = 0;
                 DshEndpoint.invalidate(this);
             }
-            if (deepScanRequested) {
-                deepScanRequested = false;
-                deep = true;
-                ep = null;
-                pollFails = 0;
-                DshEndpoint.invalidate(this);
-            }
-
             if (ep == null) {
                 discoveryStatus = "正在查找 DSH…";
-                DshEndpoint found = DshEndpoint.resolveBlocking(this, deep, new DshEndpoint.Listener() {
+                DshEndpoint found = DshEndpoint.resolveBlocking(this, new DshEndpoint.Listener() {
                     @Override
                     public void onProgress(String message) {
                         discoveryStatus = message;
