@@ -909,8 +909,13 @@ public class ChatActivity extends Activity {
                 byte[] data;
                 if (p.kind == DshApi.Part.PRESENTED) {
                     data = DshApi.fileBytes(org, p.path);
-                } else {
+                } else if (p.attachment != null) {
                     data = DshApi.attachmentBytes(org, sid, p.attachment);
+                } else if (p.localUri != null && !p.localUri.isEmpty()) {
+                    // 刚发出去还没进历史的那条，直接读本地原件
+                    data = readUri(Uri.parse(p.localUri));
+                } else {
+                    data = null;
                 }
                 final String name = (p.name == null || p.name.isEmpty())
                         ? ("dsh-" + System.currentTimeMillis()) : p.name;
@@ -1236,8 +1241,8 @@ public class ChatActivity extends Activity {
             part.kind = img ? DshApi.Part.IMAGE : DshApi.Part.FILE;
             part.name = p.name;
             part.attachment = null;
-            // 自己发的图先把本地 Uri 挂上，气泡里立刻能看见，不用等服务器读回来
-            if (img) part.localUri = p.uri.toString();
+            // 本地 Uri 先挂上：图能立刻画出来，附件点下载时也有源可读
+            if (p.uri != null) part.localUri = p.uri.toString();
             mine.parts.add(part);
         }
         pending.clear();
