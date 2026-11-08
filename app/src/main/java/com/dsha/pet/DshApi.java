@@ -180,6 +180,8 @@ public final class DshApi {
         /** PRESENTED 专用：绝对路径。 */
         public String path;
         public String description;
+        /** 刚发出去、还没从服务端读回来的本地图片：直接拿本地 Uri 画，别等网络。 */
+        public String localUri;
     }
 
     /** 一条要显示在聊天流里的东西。 */

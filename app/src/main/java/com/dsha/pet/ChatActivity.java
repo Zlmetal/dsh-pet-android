@@ -785,9 +785,32 @@ public class ChatActivity extends Activity {
 
         final String key = p.attachment == null ? null
                 : p.attachment.optString("attachmentId", null);
+        final String local = p.localUri;
         Bitmap cached = key == null ? null : imageCache.get(key);
         if (cached != null) {
             iv.setImageBitmap(cached);
+        } else if (local != null && !local.isEmpty()) {
+            // 自己刚发的图：还没从服务端读回来，直接读本地那份先画上
+            final String cacheKey = local;
+            final Bitmap hit = imageCache.get(cacheKey);
+            if (hit != null) {
+                iv.setImageBitmap(hit);
+            } else {
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final Bitmap bm = decodeThumb(readUri(Uri.parse(local)), dp(THUMB_DP * 2));
+                        if (bm == null) return;
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                imageCache.put(cacheKey, bm);
+                                iv.setImageBitmap(bm);
+                            }
+                        });
+                    }
+                }).start();
+            }
         } else if (key != null) {
             final String org = origin();
             final String sid = currentId;
@@ -1212,6 +1235,8 @@ public class ChatActivity extends Activity {
             part.kind = img ? DshApi.Part.IMAGE : DshApi.Part.FILE;
             part.name = p.name;
             part.attachment = null;
+            // 自己发的图先把本地 Uri 挂上，气泡里立刻能看见，不用等服务器读回来
+            if (img) part.localUri = p.uri.toString();
             mine.parts.add(part);
         }
         pending.clear();
