@@ -397,12 +397,33 @@ public final class DshApi {
         if (path == null || path.isEmpty()) return null;
         try {
             String url = origin + "/api/file?path=" + DshHttp.enc(path);
-            DshHttp.Resp r = DshHttp.fetchBytes("GET", url, null, null, 6000, 120000);
-            if (r == null || r.status != 200) return null;
-            return r.bytes;
+            // 服务端第一次给 302 到带 v 的缓存地址，location 是相对路径，得自己接一次
+            for (int hop = 0; hop < 3; hop++) {
+                DshHttp.Resp r = DshHttp.fetchBytes("GET", url, null, null, 6000, 120000);
+                if (r == null) return null;
+                if (r.status == 200) return r.bytes;
+                if (r.status < 300 || r.status >= 400) return null;
+                String loc = r.header("location");
+                if (loc == null || loc.isEmpty()) return null;
+                url = resolveUrl(url, loc);
+            }
+            return null;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** 拼相对 Location：支持 `?query`、`/abs`、`//host`、`http(s)://` 四种写法。 */
+    private static String resolveUrl(String base, String loc) {
+        if (loc.startsWith("http://") || loc.startsWith("https://")) return loc;
+        String org = DshHttp.originOf(base);
+        if (loc.startsWith("//")) return base.substring(0, base.indexOf("://") + 1) + loc;
+        if (loc.startsWith("/")) return org + loc;
+        int q = base.indexOf('?');
+        String bare = q < 0 ? base : base.substring(0, q);
+        if (loc.startsWith("?")) return bare + loc;
+        int slash = bare.lastIndexOf('/');
+        return (slash < 0 ? bare : bare.substring(0, slash + 1)) + loc;
     }
 
     /**
