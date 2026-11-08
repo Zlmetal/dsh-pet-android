@@ -194,7 +194,7 @@ public class ChatActivity extends Activity {
         return tv;
     }
 
-    private View buildSidebar() {
+    private LinearLayout buildSidebar() {
         LinearLayout side = new LinearLayout(this);
         side.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
