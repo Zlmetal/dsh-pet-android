@@ -917,6 +917,9 @@ public class ChatActivity extends Activity {
                 } else {
                     data = null;
                 }
+                // 服务端没有给非图片附件留读取通道，历史里自己发过的文件只能提示一下
+                final boolean noSource = data == null && p.attachment == null
+                        && p.kind != DshApi.Part.PRESENTED;
                 final String name = (p.name == null || p.name.isEmpty())
                         ? ("dsh-" + System.currentTimeMillis()) : p.name;
                 final String where = data == null ? null : saveToDownloads(name, p.mediaType, data);
@@ -925,7 +928,9 @@ public class ChatActivity extends Activity {
                     public void run() {
                         if (where == null) {
                             Toast.makeText(ChatActivity.this,
-                                    "下载失败，检查一下 DSH 连接", Toast.LENGTH_LONG).show();
+                                    noSource ? "这份老附件服务端不给读，重新发一次就能下"
+                                            : "下载失败，检查一下 DSH 连接",
+                                    Toast.LENGTH_LONG).show();
                         } else {
                             Toast.makeText(ChatActivity.this,
                                     "已保存到 " + where, Toast.LENGTH_LONG).show();
