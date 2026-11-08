@@ -876,8 +876,11 @@ public class ChatActivity extends Activity {
         nm.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         texts.addView(nm);
 
+        // 老的非图片附件服务端读不出来了，先说清楚，别让人点了才失望
+        boolean stale = p.kind == DshApi.Part.FILE && p.attachment != null
+                && (p.localUri == null || p.localUri.isEmpty());
         TextView meta = new TextView(this);
-        meta.setText(p.kind == DshApi.Part.PRESENTED ? "点一下下载"
+        meta.setText(stale ? "历史附件已不可取，重发一次才能下"
                 : ("点一下下载" + (p.bytes > 0 ? " · " + sizeText(p.bytes) : "")));
         meta.setTextSize(10);
         meta.setTextColor(0xFF9A97B8);
@@ -906,20 +909,21 @@ public class ChatActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                byte[] data;
-                if (p.kind == DshApi.Part.PRESENTED) {
-                    data = DshApi.fileBytes(org, p.path);
-                } else if (p.attachment != null) {
-                    data = DshApi.attachmentBytes(org, sid, p.attachment);
-                } else if (p.localUri != null && !p.localUri.isEmpty()) {
-                    // 刚发出去还没进历史的那条，直接读本地原件
+                byte[] data = null;
+                if (p.localUri != null && !p.localUri.isEmpty()) {
+                    // 这一轮刚发出去的，本地原件还在，直接读
                     data = readUri(Uri.parse(p.localUri));
-                } else {
-                    data = null;
                 }
-                // 服务端没有给非图片附件留读取通道，历史里自己发过的文件只能提示一下
-                final boolean noSource = data == null && p.attachment == null
-                        && p.kind != DshApi.Part.PRESENTED;
+                if (data == null && p.kind == DshApi.Part.PRESENTED) {
+                    data = DshApi.fileBytes(org, p.path);
+                }
+                // session/attachment 只收图片，非图片传过去服务端会直接拒
+                if (data == null && p.kind == DshApi.Part.IMAGE && p.attachment != null) {
+                    data = DshApi.attachmentBytes(org, sid, p.attachment);
+                }
+                // 非图片附件服务端没留读取通道（要绝对路径，历史里只有 sha256），只能提示重发
+                final boolean noSource = data == null && p.kind != DshApi.Part.PRESENTED
+                        && p.kind != DshApi.Part.IMAGE;
                 final String name = (p.name == null || p.name.isEmpty())
                         ? ("dsh-" + System.currentTimeMillis()) : p.name;
                 final String where = data == null ? null : saveToDownloads(name, p.mediaType, data);
