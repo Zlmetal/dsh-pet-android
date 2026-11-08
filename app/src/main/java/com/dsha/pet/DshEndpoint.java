@@ -110,6 +110,7 @@ public final class DshEndpoint {
 
         lastHint = null;
         openPorts.clear();
+        DshHttp.lastAuthError = null;
 
         // 1) 手动指定：用户说了算，连不上也不自动覆盖
         Manual man = parseManual(sp.getString(K_MANUAL, null));

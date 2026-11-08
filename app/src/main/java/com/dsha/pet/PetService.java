@@ -1526,8 +1526,11 @@ public class PetService extends Service {
                     }
                 });
                 if (found == null) {
+                    String authErr = DshHttp.lastAuthError;
                     if (DshEndpoint.lastHint != null) {
                         discoveryStatus = DshEndpoint.lastHint;
+                    } else if (authErr != null) {
+                        discoveryStatus = authErr;
                     } else if (DshEndpoint.openPortsSummary() != null) {
                         discoveryStatus = "未找到 DSH；本机开放端口：" + DshEndpoint.openPortsSummary();
                     } else {
