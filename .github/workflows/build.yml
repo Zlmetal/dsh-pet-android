@@ -17,13 +17,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # runner 镜像自带 Android SDK，不用 android-actions/setup-android（它要装已废弃的 "tools" 包会失败）
       - name: Install platform + build-tools
         run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
           ls "$ANDROID_HOME/build-tools/34.0.0/lib/d8.jar"
 
       - name: Restore signing keystore
