@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import java.util.zip.GZIPInputStream;
+
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -425,6 +427,10 @@ public final class DshHttp {
             req.append("Host: ").append(hostHeader(host, port, defaultPort)).append("\r\n");
             req.append("Connection: close\r\n");
             req.append("Accept: text/html,application/json,*/*\r\n");
+            // 服务端支持 gzip：同样 300 条历史，压完 1MB vs 不压 4MB，翻页快得多
+            req.append("Accept-Encoding: gzip\r\n");
+            // 历史记录一页几百 KB，gzip 能压到四分之一；压不动的小响应服务端本来也就不压
+            req.append("Accept-Encoding: gzip\r\n");
             req.append("User-Agent: dsh-pet-android\r\n");
             String ck = cookieHeader();
             if (ck != null) req.append("Cookie: ").append(ck).append("\r\n");
@@ -448,6 +454,7 @@ public final class DshHttp {
             int status = parseStatus(head);
             String lowHead = head.toLowerCase(Locale.US);
             if (lowHead.contains("transfer-encoding: chunked")) payload = dechunkBytes(payload);
+            if (lowHead.contains("content-encoding: gzip")) payload = gunzip(payload);
             return new Resp(status, head, payload);
         } finally {
             try {
@@ -591,6 +598,34 @@ public final class DshHttp {
             i = to + 2; // 跳过块尾的 CRLF
         }
         return out.toByteArray();
+    }
+
+    /**
+     * 解 gzip。服务端对 /api/session/events 这种大响应会压缩，300 条历史能从 4MB 掉到 1MB。
+     * 解不开就把原样还回去，让上层拿到乱码去报错，而不是这里静默丢数据。
+     */
+    static byte[] gunzip(byte[] b) {
+        if (b == null || b.length < 2) return b;
+        if ((b[0] & 0xFF) != 0x1F || (b[1] & 0xFF) != 0x8B) return b; // 不是 gzip 魔数
+        java.io.ByteArrayInputStream bin = new java.io.ByteArrayInputStream(b);
+        java.util.zip.GZIPInputStream in = null;
+        try {
+            in = new java.util.zip.GZIPInputStream(bin, 16384);
+            ByteArrayOutputStream out = new ByteArrayOutputStream(b.length * 3);
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (Exception e) {
+            return b;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
     }
 
     /** URL 编码（/api/file 的 path、上传的文件名都要用它）。 */
