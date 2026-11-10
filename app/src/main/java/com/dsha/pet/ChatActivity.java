@@ -60,8 +60,21 @@ public class ChatActivity extends Activity {
     /** 打开过的会话记在本地，下次进来接着聊。 */
     private static final String PREFS = "dsh_pet_chat";
     private static final String K_LAST = "last_session";
-    /** 一次拉多少条记录（体积不小，别贪）。 */
-    private static final int PAGE_MESSAGES = 6;
+    /**
+     * 一次向服务端要多少条「消息预算」。
+     *
+     * 注意这不是「能显示几条」——服务端按 user/assistant message 计数，
+     * 而一页里绝大部分记录是 tool/call、step、job、reasoning，客户端全丢掉。
+     * 实测：6 条预算拉回 38 条记录、能显示 0 条；400 条预算 2512 条记录、
+     * 能显示 16 条（gzip 后 1.3MB、0.16 秒）。所以按 400 起步、不够再续。
+     */
+    private static final int PAGE_MESSAGES = 400;
+    /** 一页至少要出这么多条能显示的，不够就继续往前翻（会话里工具调用多时会遇到）。 */
+    private static final int MIN_VISIBLE = 10;
+    /** 首次打开会话，至少先铺出这么多条能显示的。 */
+    private static final int FIRST_VISIBLE = 20;
+    /** 一次操作最多连翻几轮，防止极端会话把流量吃光。 */
+    private static final int MAX_FETCH_ROUNDS = 3;
     /** 提示行的 tag，真消息进来时要清掉。 */
     private static final String TAG_NOTICE = "notice";
     /** 聊天流顶部那条「下拉加载更早」的 tag。 */
@@ -627,6 +640,62 @@ public class ChatActivity extends Activity {
     // 历史
     // ------------------------------------------------------------------
 
+    /** 一次翻页的总结果：攒了几轮出来的消息 + 还翻不翻得动 + 下次的锚点。 */
+    private static final class Fetch {
+        final List<DshApi.Msg> msgs = new ArrayList<>();
+        boolean ok = true;
+        String err;
+        boolean hasMore;
+        /** 下一条要拉的最早 seq（翻页锚点）。 */
+        long minSeq;
+    }
+
+    /**
+     * 拉历史：一次不够就接着往前翻，直到攒够 want 条能显示的为止。
+     *
+     * 为什么不能只拉一次：服务端按 user/assistant message 计数，但一页里
+     * 九成记录是 tool/call、step、job、reasoning，客户端全丢——预算 80 条
+     * 实际只落十几条。所以这里按「能显示的条数」而不是「拉了几次」来收工。
+     */
+    private Fetch fetchHistory(String org, String sid, long beforeSeq, int want) {
+        Fetch f = new Fetch();
+        java.util.LinkedHashMap<Long, DshApi.Msg> got = new java.util.LinkedHashMap<>();
+        long cursor = beforeSeq;
+        for (int round = 0; round < MAX_FETCH_ROUNDS; round++) {
+            List<DshApi.Msg> page = new ArrayList<>();
+            DshApi.Page pg = new DshApi.Page();
+            DshApi.Result r = DshApi.events(org, sid, cursor, PAGE_MESSAGES, page, pg);
+            if (!r.ok) {
+                // 第一轮就失败才算出错；后面几轮失败就用攒到的那些
+                if (round == 0) {
+                    f.ok = false;
+                    f.err = r.msg;
+                    return f;
+                }
+                break;
+            }
+            for (DshApi.Msg m : page) {
+                if (m.seq > 0) got.put(m.seq, m);
+            }
+            f.hasMore = pg.hasMore;
+            if (pg.minSeq > 0) {
+                f.minSeq = pg.minSeq;
+                cursor = pg.minSeq;
+            } else {
+                f.hasMore = false;
+            }
+            if (got.size() >= want || !pg.hasMore || cursor <= 0) break;
+        }
+        f.msgs.addAll(got.values());
+        java.util.Collections.sort(f.msgs, new java.util.Comparator<DshApi.Msg>() {
+            @Override
+            public int compare(DshApi.Msg a, DshApi.Msg b) {
+                return Long.compare(a.seq, b.seq);
+            }
+        });
+        return f;
+    }
+
     /**
      * 打开会话：先把本地存档画出来（秒开，不用等网络），再去拉服务端最新一页。
      * 服务端那页回来以后跟存档合并去重，重新画一次。
@@ -653,32 +722,29 @@ public class ChatActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final List<DshApi.Msg> msgs = new ArrayList<>();
-                final DshApi.Page pg = new DshApi.Page();
-                final DshApi.Result r = DshApi.events(org, sid, 0, PAGE_MESSAGES, msgs, pg);
-                // running 只是提示，读失败不影响历史显示
+                final Fetch f = fetchHistory(org, sid, 0, FIRST_VISIBLE);
                 final boolean[] running = new boolean[1];
-                if (r.ok) DshApi.state(org, sid, null, running);
-                final List<DshApi.Msg> merged = r.ok ? ChatStore.merge(
-                        ChatActivity.this, sid, msgs) : null;
+                if (f.ok) DshApi.state(org, sid, null, running);
+                final List<DshApi.Msg> merged = f.ok ? ChatStore.merge(
+                        ChatActivity.this, sid, f.msgs) : null;
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
                         if (!sid.equals(currentId)) return;
-                        if (!r.ok) {
+                        if (!f.ok) {
                             // 有存档就照常看着，别拿网络错误盖掉已经显示的内容
                             if (cached.isEmpty()) {
                                 clearFeed();
-                                addNotice("读取历史失败：" + r.msg);
+                                addNotice("读取历史失败：" + f.err);
                             }
                             return;
                         }
                         clearFeed();
-                        if (pg.minSeq > 0) oldestSeq = pg.minSeq;
+                        if (f.minSeq > 0) oldestSeq = f.minSeq;
                         else if (merged != null && !merged.isEmpty()) {
                             oldestSeq = merged.get(0).seq;
                         }
-                        hasMore = pg.hasMore;
+                        hasMore = f.hasMore;
                         if (merged == null || merged.isEmpty()) {
                             addNotice("这个会话还是空的，说点什么吧。");
                             return;
@@ -708,10 +774,9 @@ public class ChatActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final List<DshApi.Msg> msgs = new ArrayList<>();
-                final DshApi.Page pg = new DshApi.Page();
-                final DshApi.Result r = DshApi.events(org, sid, before, PAGE_MESSAGES, msgs, pg);
-                if (r.ok) ChatStore.merge(ChatActivity.this, sid, msgs);
+                final Fetch f = fetchHistory(org, sid, before, MIN_VISIBLE);
+                final List<DshApi.Msg> msgs = f.msgs;
+                if (f.ok) ChatStore.merge(ChatActivity.this, sid, msgs);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
@@ -720,12 +785,17 @@ public class ChatActivity extends Activity {
                             return;
                         }
                         loadingOlder = false;
-                        if (!r.ok) {
-                            setOlderHint("没翻动：" + r.msg);
+                        if (!f.ok) {
+                            setOlderHint("没翻动：" + f.err);
                             return;
                         }
-                        hasMore = pg.hasMore;
-                        if (pg.minSeq > 0) oldestSeq = pg.minSeq;
+                        hasMore = f.hasMore;
+                        if (f.minSeq > 0) oldestSeq = f.minSeq;
+                        if (msgs.isEmpty()) {
+                            // 连着翻了几轮还是没捞到能显示的：别让提示一直转，说明白
+                            setOlderHint(hasMore ? "这一段全是工具调用，再拉一次" : "没有更早的了");
+                            return;
+                        }
 
                         final int keepY = scroll.getScrollY();
                         final int oldH = feed.getHeight();
