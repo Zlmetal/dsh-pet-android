@@ -561,7 +561,7 @@ public final class DshHttp {
         while ((n = in.read(buf)) > 0) {
             bos.write(buf, 0, n);
             total += n;
-            if (total > (16 << 20)) break; // 上限管的是「收到的字节」；gzip 后 1200 条预算的历史约 4MB，没压要 11MB
+            if (total > (16 << 20)) break; // 上限管的是「收到的字节」；gzip 后 800 条预算的历史约 2.8MB，没压要 11MB
         }
         return bos.toByteArray();
     }

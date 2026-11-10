@@ -65,11 +65,11 @@ public class ChatActivity extends Activity {
      *
      * 注意这不是「能显示几条」——服务端按 user/assistant message 计数，
      * 而一页里绝大部分记录是 tool/call、step、job、reasoning，客户端全丢掉。
-     * 实测（一个工具调用极多的会话）：400 条预算只能落 9 条能显示的，
-     * 1000 条落 31 条、gzip 后 3.6MB / 0.53 秒；1500 条落 50 条 / 0.79 秒。
-     * 预算给足了就一轮到位，省掉反复翻页——多翻一轮就是多传一份重复记录。
+     * 实测（一个工具调用极多的会话，gzip 后）：400 条预算只落 9 条能显示的，
+     * 800 条落 28 条 / 2.8MB；1200 条落 34 条 / 3.9MB。取 800：一轮就能凑够，
+     * 又不至于让手机去解析十几 MB 的 JSON。
      */
-    private static final int PAGE_MESSAGES = 1200;
+    private static final int PAGE_MESSAGES = 800;
     /** 一页至少要出这么多条能显示的，不够就继续往前翻（会话里工具调用多时会遇到）。 */
     private static final int MIN_VISIBLE = 30;
     /** 首次打开会话，至少先铺出这么多条能显示的。 */
