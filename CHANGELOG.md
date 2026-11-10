@@ -10,8 +10,8 @@
 
 ### 变更
 
-- **翻页按「能显示几条」收工**：新增 `fetchHistory()`，一轮不够就接着拿 `minSeq` 往前翻，攒够才算完（首屏 24 条、翻页 12 条），最多 4 轮。`PAGE_MESSAGES` 6 → 200。
-- **HTTP 开 gzip**：`DshHttp` 请求带 `Accept-Encoding: gzip`，响应含 `Content-Encoding: gzip` 时解压（`gunzip()`，魔数 `1F 8B` 不符就原样返回）。同样 300 条历史不压 4.0MB、压完 1.0MB，翻页带宽降到四分之一。
+- **翻页按「能显示几条」收工**：新增 `fetchHistory()`，一轮不够就接着拿 `minSeq` 往前翻，攒够才算完（首屏 20 条、翻页 10 条），最多 3 轮。`PAGE_MESSAGES` 6 → 400（实测 400 条预算能显示 16 条、gzip 后 1.3MB、0.16 秒）。连着翻几轮还是空的会直说「这一段全是工具调用」，不再让提示一直转。
+- **HTTP 开 gzip**：`DshHttp` 请求带 `Accept-Encoding: gzip`，响应含 `Content-Encoding: gzip` 时解压（`gunzip()`，魔数 `1F 8B` 不符就原样返回）。同样 300 条历史不压 4.0MB、压完 1.0MB，翻页带宽降到四分之一。读响应上限 4MB → 8MB。
 
 ### 版本
 
