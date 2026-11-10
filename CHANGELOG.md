@@ -2,6 +2,24 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；`versionCode` 从 1.0 起每发一版递增 1（3.x 系列为 `versionCode = 21 + y`，4.x 为 `29 + x`，5.0 为 35，5.1 为 36，5.2 为 37，5.3 为 38，5.3.1 为 39，5.4 为 40；1.0.0.1 起 `versionCode = 10001`）。
 
+## [1.0.0.18] - 2026-11-10
+
+### 新增
+
+- **语音播报（系统 TTS）**：任务完成 / 出错 / 等人确认时，除了桌面气泡再念一句工作状态台词。走 `android.speech.tts.TextToSpeech`，离线、零延迟、不花一分钱；同句 3 秒内不重念。`AndroidManifest.xml` 补 `<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>`——Android 11 起不声明就绑不到系统引擎，`speak()` 会静默失败。主界面加「语音播报状态」开关（`voice_notify`，默认开）。
+- **事件横幅通知**：独立 `pet-event` 通道（`IMPORTANCE_HIGH`，带震动），标题按类型分「这一轮搞定啦 / 这一步没跑通 / 需要你确认一下」，点开直达对话页；等确认与出错额外补一次 60ms 短震。
+- **对话内容本地存档**（`ChatStore.java`）：按会话存 `files/chat/<sid>.json`，按 `seq` 去重合并、最多留 400 条、原子写（tmp + rename）。打开会话先上屏存档再拉服务端，切走再回来不用重新加载；网络失败但有存档时不会拿错误盖掉已经显示的内容。
+- **下拉加载更早**：滚到顶再往下拉一截就翻一页（跟 QQ 一致），不再只能点那行字。实现在 `ScrollView` 子类 `PullScroll.onInterceptTouchEvent`——气泡是可长按选字的 `TextView`，会把 `DOWN` 吃掉，`setOnTouchListener` 根本收不到事件。插完按新增高度补 `scrollY`，正在看的那句不会跳走。
+
+### 变更
+
+- **对话正文改用系统字体**：`cute.ttf` 只留在标题和侧栏，成段文字回系统字体。
+- **播报取向对齐插件 `isPageActive()`**：亮屏且对话页在前台时只弹气泡，不响、不念、不弹横幅。
+
+### 版本
+
+- `versionCode` 10017 → 10018，`versionName` `1.0.0.17` → `1.0.0.18`。
+
 ## [1.0.0.17] - 2026-11-09
 
 ### 变更
