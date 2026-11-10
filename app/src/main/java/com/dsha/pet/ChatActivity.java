@@ -65,22 +65,23 @@ public class ChatActivity extends Activity {
      *
      * 注意这不是「能显示几条」——服务端按 user/assistant message 计数，
      * 而一页里绝大部分记录是 tool/call、step、job、reasoning，客户端全丢掉。
-     * 实测：6 条预算拉回 38 条记录、能显示 0 条；400 条预算 2512 条记录、
-     * 能显示 16 条（gzip 后 1.3MB、0.16 秒）。所以按 400 起步、不够再续。
+     * 实测（一个工具调用极多的会话）：400 条预算只能落 9 条能显示的，
+     * 1000 条落 31 条、gzip 后 3.6MB / 0.53 秒；1500 条落 50 条 / 0.79 秒。
+     * 预算给足了就一轮到位，省掉反复翻页——多翻一轮就是多传一份重复记录。
      */
-    private static final int PAGE_MESSAGES = 400;
+    private static final int PAGE_MESSAGES = 1200;
     /** 一页至少要出这么多条能显示的，不够就继续往前翻（会话里工具调用多时会遇到）。 */
-    private static final int MIN_VISIBLE = 10;
+    private static final int MIN_VISIBLE = 30;
     /** 首次打开会话，至少先铺出这么多条能显示的。 */
-    private static final int FIRST_VISIBLE = 20;
+    private static final int FIRST_VISIBLE = 30;
     /** 一次操作最多连翻几轮，防止极端会话把流量吃光。 */
-    private static final int MAX_FETCH_ROUNDS = 3;
+    private static final int MAX_FETCH_ROUNDS = 2;
     /** 提示行的 tag，真消息进来时要清掉。 */
     private static final String TAG_NOTICE = "notice";
     /** 聊天流顶部那条「下拉加载更早」的 tag。 */
     private static final String TAG_OLDER = "older";
     /** 手指贴着顶部往下拉多少 dp 算一次翻页。 */
-    private static final int PULL_TRIGGER_DP = 90;
+    private static final int PULL_TRIGGER_DP = 70;
     private static final int REQ_PICK_IMAGE = 11;
     private static final int REQ_PICK_FILE = 12;
     /** 单次上传上限，超过就不让发（手机流量和内存都受不了）。 */
@@ -834,7 +835,7 @@ public class ChatActivity extends Activity {
 
     private View olderButton() {
         TextView tv = new TextView(this);
-        tv.setText("↑ 下拉加载更早");
+        tv.setText("↑ 下拉或点这里加载更早");
         tv.setTextSize(12);
         tv.setTextColor(0xFF7B6BB5);
         tv.setGravity(Gravity.CENTER);
