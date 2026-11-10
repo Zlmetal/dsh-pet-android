@@ -204,6 +204,72 @@ public final class DshApi {
         }
     }
 
+    // ------------------------------------------------------------------
+    // 本地缓存用的序列化
+    // ------------------------------------------------------------------
+
+    /** 一条消息转成可落盘的 JSON。 */
+    public static JSONObject toJson(Msg m) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("role", m.role);
+            o.put("seq", m.seq);
+            o.put("time", m.time);
+            if (m.text != null) o.put("text", m.text);
+            JSONArray arr = new JSONArray();
+            for (Part p : m.parts) {
+                JSONObject b = new JSONObject();
+                b.put("kind", p.kind);
+                if (p.text != null) b.put("text", p.text);
+                if (p.attachment != null) b.put("attachment", p.attachment);
+                if (p.mediaType != null) b.put("mediaType", p.mediaType);
+                if (p.name != null) b.put("name", p.name);
+                if (p.bytes > 0) b.put("bytes", p.bytes);
+                if (p.width > 0) b.put("width", p.width);
+                if (p.height > 0) b.put("height", p.height);
+                if (p.path != null) b.put("path", p.path);
+                if (p.description != null) b.put("description", p.description);
+                if (p.localUri != null) b.put("localUri", p.localUri);
+                arr.put(b);
+            }
+            o.put("parts", arr);
+        } catch (Exception ignored) {
+        }
+        return o;
+    }
+
+    /** 从缓存读回来；坏数据返回 null，让调用方跳过这一条。 */
+    public static Msg fromJson(JSONObject o) {
+        if (o == null) return null;
+        Msg m = new Msg();
+        m.role = o.optString("role", "assistant");
+        m.seq = o.optLong("seq", 0);
+        m.time = o.optLong("time", 0);
+        String txt = o.optString("text", "");
+        m.text = txt.isEmpty() ? null : txt;
+        JSONArray arr = o.optJSONArray("parts");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject b = arr.optJSONObject(i);
+                if (b == null) continue;
+                Part p = new Part();
+                p.kind = b.optInt("kind", Part.TEXT);
+                p.text = b.optString("text", null);
+                p.attachment = b.optJSONObject("attachment");
+                p.mediaType = b.optString("mediaType", null);
+                p.name = b.optString("name", null);
+                p.bytes = b.optLong("bytes", 0);
+                p.width = b.optInt("width", 0);
+                p.height = b.optInt("height", 0);
+                p.path = b.optString("path", null);
+                p.description = b.optString("description", null);
+                p.localUri = b.optString("localUri", null);
+                m.parts.add(p);
+            }
+        }
+        return m;
+    }
+
     /** 一页历史的分页信息。 */
     public static final class Page {
         /** 还有更早的记录可以翻。 */
@@ -589,5 +655,72 @@ public final class DshApi {
     public static boolean probe(String origin) {
         List<SessionRow> rows = new ArrayList<>();
         return list(origin, rows).ok;
+    }
+
+    // ------------------------------------------------------------------
+    // 本地存档用的一次性转换（ChatStore 读写 JSON 用）
+    // ------------------------------------------------------------------
+
+    /** 一条消息 → 紧凑 JSON。附件块只留绘制和重新拉取需要的字段。 */
+    public static JSONObject toJson(Msg m) {
+        if (m == null) return null;
+        JSONObject o = new JSONObject();
+        try {
+            if (m.role != null) o.put("role", m.role);
+            if (m.text != null) o.put("text", m.text);
+            if (m.seq > 0) o.put("seq", m.seq);
+            if (m.time > 0) o.put("time", m.time);
+            if (m.error) o.put("error", true);
+            JSONArray ps = new JSONArray();
+            for (Part p : m.parts) {
+                JSONObject po = new JSONObject();
+                po.put("kind", p.kind);
+                if (p.text != null) po.put("text", p.text);
+                if (p.attachment != null) po.put("attachment", p.attachment);
+                if (p.mediaType != null) po.put("mediaType", p.mediaType);
+                if (p.name != null) po.put("name", p.name);
+                if (p.bytes > 0) po.put("bytes", p.bytes);
+                if (p.width > 0) po.put("width", p.width);
+                if (p.height > 0) po.put("height", p.height);
+                if (p.path != null) po.put("path", p.path);
+                if (p.description != null) po.put("description", p.description);
+                // localUri 不存：那是本次运行的 content:// 授权，重启后已失效
+                ps.put(po);
+            }
+            o.put("parts", ps);
+        } catch (Exception ignored) {
+        }
+        return o;
+    }
+
+    /** JSON → 一条消息；缺字段就当没有，坏一条跳过就好。 */
+    public static Msg fromJson(JSONObject o) {
+        if (o == null) return null;
+        Msg m = new Msg();
+        m.role = o.optString("role", "assistant");
+        m.text = o.optString("text", null);
+        m.seq = o.optLong("seq", 0);
+        m.time = o.optLong("time", 0);
+        m.error = o.optBoolean("error", false);
+        JSONArray ps = o.optJSONArray("parts");
+        if (ps != null) {
+            for (int i = 0; i < ps.length(); i++) {
+                JSONObject po = ps.optJSONObject(i);
+                if (po == null) continue;
+                Part p = new Part();
+                p.kind = po.optInt("kind", Part.TEXT);
+                p.text = po.optString("text", null);
+                p.attachment = po.optJSONObject("attachment");
+                p.mediaType = po.optString("mediaType", null);
+                p.name = po.optString("name", null);
+                p.bytes = po.optLong("bytes", 0L);
+                p.width = po.optInt("width", 0);
+                p.height = po.optInt("height", 0);
+                p.path = po.optString("path", null);
+                p.description = po.optString("description", null);
+                m.parts.add(p);
+            }
+        }
+        return m;
     }
 }

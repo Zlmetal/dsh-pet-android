@@ -27,6 +27,7 @@ public class MainActivity extends Activity {
     private TextView status;
     private TextView debug;
     private android.widget.Switch linkSwitch;
+    private android.widget.Switch voiceSwitch;
     private TextView epValue;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable refresh = new Runnable() {
@@ -142,6 +143,18 @@ public class MainActivity extends Activity {
         });
         rowMode.addView(linkSwitch);
         cards.addView(rowMode, matchTop(dp(10)));
+
+        // 通知播报：任务跑完 / 出错 / 等确认时，除桌面气泡外再念一句、弹一条横幅
+        LinearLayout rowVoice = row();
+        rowVoice.addView(label("语音播报状态", weightLp(1f)));
+        voiceSwitch = new android.widget.Switch(this);
+        voiceSwitch.setChecked(getSharedPreferences("pet", MODE_PRIVATE)
+                .getBoolean("voice_notify", true));
+        voiceSwitch.setOnCheckedChangeListener((btn, checked) ->
+                getSharedPreferences("pet", MODE_PRIVATE)
+                        .edit().putBoolean("voice_notify", checked).apply());
+        rowVoice.addView(voiceSwitch);
+        cards.addView(rowVoice, matchTop(dp(10)));
 
         // ---------- 主按钮 ----------
         TextView start = pill("启动大肥鱼", 0xFFFFFFFF, true);

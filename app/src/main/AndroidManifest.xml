@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dsha.pet"
-    android:versionCode="10017"
-    android:versionName="1.0.0.17">
+    android:versionCode="10018"
+    android:versionName="1.0.0.18">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -15,6 +15,10 @@
 
     <queries>
         <package android:name="dsh.android.client" />
+        <!-- Android 11 起要显式声明才能绑到系统 TTS 引擎，否则 speak() 静默失败 -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
     <application
         android:label="大肥鱼桌宠"

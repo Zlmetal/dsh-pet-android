@@ -323,6 +323,9 @@ public class PetService extends Service {
         prefs = getSharedPreferences("pet", MODE_PRIVATE);
         linkMode = prefs.getBoolean("linkMode", true);
         pausedLink = prefs.getBoolean("pausedLink", false);
+        createEventChannel();
+        // 引擎初始化要一两秒，先预热，免得第一条台词卡在启动上
+        if (prefs.getBoolean("voice_notify", true)) PetVoice.get().warm(this);
         prefs.edit().putLong("lastBeat", System.currentTimeMillis()).apply();
         inst = this;
         ep = DshEndpoint.cached(this);
@@ -1723,9 +1726,18 @@ public class PetService extends Service {
             showBubble("余额 ¥" + balance, 5000);
         }
         if (notify != null) {
-            if ("success".equals(notify)) showBubble(pickWork(4), 4500);
-            else if ("error".equals(notify)) showBubble(pickWork(5), 4500);
-            else showBubble(pickWork(3), 4500);
+            String line = "error".equals(notify) ? pickWork(5)
+                    : "success".equals(notify) ? pickWork(4) : pickWork(3);
+            showBubble(line, 4500);
+            // 屏幕亮着、人正盯着对话页的时候不打扰：跟网页端 isPageActive() 一个取向，
+            // 只是这里把「页面可见且聚焦」换成了「亮屏且对话在前台」。
+            if (!(screenOn && chatOpen)) {
+                postEventNotice(notify, line);
+                if (getSharedPreferences("pet", MODE_PRIVATE)
+                        .getBoolean("voice_notify", true)) {
+                    PetVoice.get().speak(this, line);
+                }
+            }
         }
         if (state != null && !state.equals(lastState)) {
             lastState = state;
@@ -1789,6 +1801,77 @@ public class PetService extends Service {
         }
     }
 
+    /**
+     * 事件通道只建一次：建通道要指定重要级，通道建好之后改重要性无效
+     * （只有用户在系统设置里能改），所以别在每次发通知时反复创建。
+     */
+    private void createEventChannel() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            NotificationChannel ch = new NotificationChannel("pet-event", "任务提醒",
+                    NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("任务完成、出错、需要确认时提醒");
+            ch.setShowBadge(true);
+            ch.enableVibration(true);
+            ch.setVibrationPattern(new long[]{0, 80, 60, 80});
+            nm.createNotificationChannel(ch);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * 事件横幅：任务完成 / 出错 / 等人确认时弹一条会响会震的通知。
+     *
+     * 跟常驻运行通知分开两个 channel——常驻那条是 LOW（不吵），事件这条得上 HIGH
+     * 才能浮出来。id 用时间戳，多条互不覆盖，用户划掉就没了。
+     */
+    private void postEventNotice(String kind, String line) {
+        if (line == null || line.isEmpty()) return;
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            String title;
+            int icon;
+            if ("success".equals(kind)) {
+                title = "这一轮搞定啦";
+                icon = android.R.drawable.stat_notify_more;
+            } else if ("error".equals(kind)) {
+                title = "这一步没跑通";
+                icon = android.R.drawable.stat_notify_error;
+            } else {
+                title = "需要你确认一下";
+                icon = android.R.drawable.stat_sys_warning;
+            }
+            // 通道在 createEventChannel() 里建过了，这里不再重复创建
+            // 点通知直接进对话页，省得再从桌面找
+            Intent openChat = new Intent(this, ChatActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent pi = PendingIntent.getActivity(this, 3, openChat,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, "pet-event")
+                    : new Notification.Builder(this);
+            b.setContentTitle(title)
+                    .setContentText(line)
+                    .setStyle(new Notification.BigTextStyle().bigText(line))
+                    .setSmallIcon(icon)
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .setOnlyAlertOnce(false);
+            if (Build.VERSION.SDK_INT >= 21) b.setColor(0xFFA98CFF);
+            nm.notify((int) (System.currentTimeMillis() % 100000) + 100, b.build());
+            // 通知响铃之外再补一次短震：只亮屏没声音的场合也能察觉
+            if ("waiting".equals(kind) || "error".equals(kind)) {
+                try {
+                    Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+                    if (v != null && v.hasVibrator()) v.vibrate(60);
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private Notification buildNotification() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -1835,6 +1918,10 @@ public class PetService extends Service {
     public void onDestroy() {
         inst = null;
         running = false;
+        try {
+            PetVoice.get().release();
+        } catch (Throwable ignored) {
+        }
         alive = false;
         flying = false;
         ui.removeCallbacks(flyTick);

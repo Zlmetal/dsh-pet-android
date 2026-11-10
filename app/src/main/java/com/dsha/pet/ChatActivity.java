@@ -63,6 +63,10 @@ public class ChatActivity extends Activity {
     private static final int PAGE_MESSAGES = 6;
     /** 提示行的 tag，真消息进来时要清掉。 */
     private static final String TAG_NOTICE = "notice";
+    /** 聊天流顶部那条「下拉加载更早」的 tag。 */
+    private static final String TAG_OLDER = "older";
+    /** 手指贴着顶部往下拉多少 dp 算一次翻页。 */
+    private static final int PULL_TRIGGER_DP = 90;
     private static final int REQ_PICK_IMAGE = 11;
     private static final int REQ_PICK_FILE = 12;
     /** 单次上传上限，超过就不让发（手机流量和内存都受不了）。 */
@@ -105,6 +109,12 @@ public class ChatActivity extends Activity {
     private boolean hasMore = false;
     private boolean sending = false;
     private boolean loading = false;
+    /** 正在翻更早的一页（防连拉，也防手指抖一下连发两次请求）。 */
+    private boolean loadingOlder = false;
+    /** 手指贴顶后往下拉了多远（像素），到 PULL_TRIGGER 翻一页。 */
+    private float pullAccum = 0;
+    /** 这次按下还能不能触发翻页：按下时贴顶才算，滚动起来了就作废。 */
+    private boolean pullArmed = false;
     private boolean sidebarOpen = true;
 
     /** 一个待发送的本地文件。 */
@@ -201,6 +211,7 @@ public class ChatActivity extends Activity {
         feed.setPadding(dp(16), dp(10), dp(16), dp(16));
         scroll.addView(feed, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        installPullToLoad();
 
         col.addView(buildInput());
         return col;
@@ -620,12 +631,29 @@ public class ChatActivity extends Activity {
     // 历史
     // ------------------------------------------------------------------
 
+    /**
+     * 打开会话：先把本地存档画出来（秒开，不用等网络），再去拉服务端最新一页。
+     * 服务端那页回来以后跟存档合并去重，重新画一次。
+     */
     private void loadLatest() {
         if (currentId == null) return;
         final String org = origin();
         final String sid = currentId;
         clearFeed();
-        addNotice("拉取历史…");
+
+        // 1) 本地存档先上屏
+        final List<DshApi.Msg> cached = ChatStore.load(this, sid);
+        if (!cached.isEmpty()) {
+            oldestSeq = cached.get(0).seq;
+            hasMore = true;
+            feed.addView(olderButton());
+            for (DshApi.Msg m : cached) addMsgNoScroll(m);
+            scrollBottom();
+        } else {
+            addNotice("拉取历史…");
+        }
+
+        // 2) 服务端最新一页
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -635,23 +663,33 @@ public class ChatActivity extends Activity {
                 // running 只是提示，读失败不影响历史显示
                 final boolean[] running = new boolean[1];
                 if (r.ok) DshApi.state(org, sid, null, running);
+                final List<DshApi.Msg> merged = r.ok ? ChatStore.merge(
+                        ChatActivity.this, sid, msgs) : null;
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
                         if (!sid.equals(currentId)) return;
-                        clearFeed();
                         if (!r.ok) {
-                            addNotice("读取历史失败：" + r.msg);
+                            // 有存档就照常看着，别拿网络错误盖掉已经显示的内容
+                            if (cached.isEmpty()) {
+                                clearFeed();
+                                addNotice("读取历史失败：" + r.msg);
+                            }
                             return;
                         }
-                        if (msgs.isEmpty()) {
+                        clearFeed();
+                        if (pg.minSeq > 0) oldestSeq = pg.minSeq;
+                        else if (merged != null && !merged.isEmpty()) {
+                            oldestSeq = merged.get(0).seq;
+                        }
+                        hasMore = pg.hasMore;
+                        if (merged == null || merged.isEmpty()) {
                             addNotice("这个会话还是空的，说点什么吧。");
                             return;
                         }
-                        hasMore = pg.hasMore;
-                        oldestSeq = pg.minSeq;
                         if (hasMore) feed.addView(olderButton());
-                        for (DshApi.Msg m : msgs) addMsg(m);
+                        for (DshApi.Msg m : merged) addMsgNoScroll(m);
+                        scrollBottom();
                         if (running[0]) addTyping();
                     }
                 });
@@ -659,39 +697,69 @@ public class ChatActivity extends Activity {
         }).start();
     }
 
+    /**
+     * 往上翻一页：只把这次拉回来的（严格更老的）几条插到顶部，
+     * 已经显示的条目一个都不重画——重画会丢滚动位置、也会把「正在想…」顶掉。
+     * 插完把 scrollY 补上新增高度，正在看的那句不会跳走。
+     */
     private void loadOlder() {
-        if (currentId == null || oldestSeq <= 0) return;
+        if (currentId == null || oldestSeq <= 0 || loadingOlder) return;
+        loadingOlder = true;
         final String org = origin();
         final String sid = currentId;
         final long before = oldestSeq;
+        setOlderHint("↑ 正在找更早的…");
         new Thread(new Runnable() {
             @Override
             public void run() {
                 final List<DshApi.Msg> msgs = new ArrayList<>();
                 final DshApi.Page pg = new DshApi.Page();
                 final DshApi.Result r = DshApi.events(org, sid, before, PAGE_MESSAGES, msgs, pg);
+                if (r.ok) ChatStore.merge(ChatActivity.this, sid, msgs);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (!sid.equals(currentId)) return;
-                        if (!r.ok) {
-                            addNotice("翻页失败：" + r.msg);
+                        if (!sid.equals(currentId)) {
+                            loadingOlder = false;
                             return;
                         }
-                        View first = feed.getChildAt(0);
-                        if (first != null && "older".equals(String.valueOf(first.getTag()))) {
-                            feed.removeViewAt(0);
+                        loadingOlder = false;
+                        if (!r.ok) {
+                            setOlderHint("没翻动：" + r.msg);
+                            return;
                         }
                         hasMore = pg.hasMore;
                         if (pg.minSeq > 0) oldestSeq = pg.minSeq;
+
+                        final int keepY = scroll.getScrollY();
+                        final int oldH = feed.getHeight();
+                        removeNotices();
+                        View first = feed.getChildCount() > 0 ? feed.getChildAt(0) : null;
                         int at = 0;
+                        if (first != null && TAG_OLDER.equals(first.getTag())) {
+                            feed.removeViewAt(0);
+                        }
                         if (hasMore) {
                             feed.addView(olderButton(), 0);
                             at = 1;
                         }
                         for (int i = 0; i < msgs.size(); i++) {
-                            feed.addView(msgView(msgs.get(i)), at + i);
+                            View v = msgView(msgs.get(i));
+                            if (v != null) {
+                                feed.addView(v, at + i);
+                            }
                         }
+                        // 还有更早就保持提示行原样，拉到头了才改成「没有更早」
+                        if (!hasMore) setOlderHint("没有更早的了");
+                        // 等这一帧量完高度再补滚动，否则量到的是旧高度
+                        feed.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                int grew = feed.getHeight() - oldH;
+                                if (grew > 0) scroll.scrollTo(0, keepY + grew);
+                                else scroll.scrollTo(0, keepY);
+                            }
+                        });
                     }
                 });
             }
@@ -700,12 +768,12 @@ public class ChatActivity extends Activity {
 
     private View olderButton() {
         TextView tv = new TextView(this);
-        tv.setText("↑ 更早的消息");
+        tv.setText("↑ 下拉加载更早");
         tv.setTextSize(12);
         tv.setTextColor(0xFF7B6BB5);
         tv.setGravity(Gravity.CENTER);
-        tv.setPadding(dp(10), dp(10), dp(10), dp(10));
-        tv.setTag("older");
+        tv.setPadding(dp(10), dp(14), dp(10), dp(14));
+        tv.setTag(TAG_OLDER);
         tv.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -714,9 +782,82 @@ public class ChatActivity extends Activity {
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(6);
+        lp.topMargin = dp(2);
         tv.setLayoutParams(lp);
         return tv;
+    }
+
+    /** 改顶部那条的字；没有就补一条。 */
+    private void setOlderHint(String text) {
+        for (int i = 0; i < feed.getChildCount(); i++) {
+            View v = feed.getChildAt(i);
+            if (v instanceof TextView && TAG_OLDER.equals(v.getTag())) {
+                ((TextView) v).setText(text);
+                return;
+            }
+        }
+        if (feed.getChildCount() > 0) {
+            TextView tv = new TextView(this);
+            tv.setText(text);
+            tv.setTextSize(12);
+            tv.setTextColor(0xFF7B6BB5);
+            tv.setGravity(Gravity.CENTER);
+            tv.setPadding(dp(10), dp(14), dp(10), dp(14));
+            tv.setTag(TAG_OLDER);
+            feed.addView(tv, 0);
+        }
+    }
+
+    /**
+     * 滚到顶再往下拉一截就翻页（跟 QQ 一致）。
+     *
+     * ScrollView 到顶后 scrollY 就卡在 0 了，拉不出负值，所以当「已经贴顶」
+     * 期间手指还在往下走时，累计位移到阈值就触发，触发后清零等下一次。
+     */
+    private void installPullToLoad() {
+        scroll.setOnTouchListener(new View.OnTouchListener() {
+            float downY;
+
+            @Override
+            public boolean onTouch(View v, android.view.MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        downY = e.getY();
+                        pullAccum = 0;
+                        // 按下时就贴顶才备着，中途滚上去的不算
+                        pullArmed = hasMore && !loadingOlder && scroll.getScrollY() <= dp(4);
+                        break;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (!pullArmed) return false;
+                        if (scroll.getScrollY() > dp(4)) {
+                            pullArmed = false;
+                            return false;
+                        }
+                        // 只算往下拉（手指向下 = y 变大）
+                        float d = e.getY() - downY;
+                        if (d > 0) pullAccum = d;
+                        if (pullAccum > dp(PULL_TRIGGER_DP)) {
+                            pullArmed = false;
+                            pullAccum = 0;
+                            loadOlder();
+                        }
+                        break;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        pullArmed = false;
+                        pullAccum = 0;
+                        break;
+                }
+                // 不吃事件：垂直滚动还得交给 ScrollView 自己
+                return false;
+            }
+        });
+    }
+
+    /** 追加一条但不滚到底——重画历史时用，否则每加一条跳一次。 */
+    private void addMsgNoScroll(DshApi.Msg m) {
+        View v = msgView(m);
+        if (v != null) feed.addView(v);
     }
 
     private void addMsg(DshApi.Msg m) {
@@ -765,7 +906,7 @@ public class ChatActivity extends Activity {
             g.setColor(mine ? 0xFFA98CFF : 0xFFFFFFFF);
             tv.setBackground(g);
             tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78f));
-            if (!mine && cute != null) tv.setTypeface(cute);
+            // 消息正文一律用系统字体：cute.ttf 当标题好看，成段文字看着费劲
             rowLine.addView(tv);
             col.addView(rowLine);
         }
@@ -1408,6 +1549,8 @@ public class ChatActivity extends Activity {
         pending.clear();
         renderPending();
         addMsg(mine);
+        // 发出去的那条立刻落盘：等回复的空档切走再回来也还在
+        ChatStore.append(this, currentId, mine);
 
         final View typing = addTyping();
         sending = true;
@@ -1474,7 +1617,10 @@ public class ChatActivity extends Activity {
                             addNotice("这一轮没产出文字回复（可能只调了工具）。");
                             return;
                         }
-                        for (DshApi.Msg m : got) addMsg(m);
+                        for (DshApi.Msg m : got) {
+                            addMsg(m);
+                            ChatStore.append(ChatActivity.this, sid, m);
+                        }
                     }
                 });
             }
