@@ -3,6 +3,7 @@ package com.dsha.pet;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
@@ -111,10 +112,6 @@ public class ChatActivity extends Activity {
     private boolean loading = false;
     /** 正在翻更早的一页（防连拉，也防手指抖一下连发两次请求）。 */
     private boolean loadingOlder = false;
-    /** 手指贴顶后往下拉了多远（像素），到 PULL_TRIGGER 翻一页。 */
-    private float pullAccum = 0;
-    /** 这次按下还能不能触发翻页：按下时贴顶才算，滚动起来了就作废。 */
-    private boolean pullArmed = false;
     private boolean sidebarOpen = true;
 
     /** 一个待发送的本地文件。 */
@@ -200,7 +197,7 @@ public class ChatActivity extends Activity {
 
         col.addView(buildBar());
 
-        scroll = new ScrollView(this);
+        scroll = new PullScroll(this);
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(false);
         col.addView(scroll, new LinearLayout.LayoutParams(
@@ -211,7 +208,6 @@ public class ChatActivity extends Activity {
         feed.setPadding(dp(16), dp(10), dp(16), dp(16));
         scroll.addView(feed, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        installPullToLoad();
 
         col.addView(buildInput());
         return col;
@@ -811,47 +807,39 @@ public class ChatActivity extends Activity {
     /**
      * 滚到顶再往下拉一截就翻页（跟 QQ 一致）。
      *
-     * ScrollView 到顶后 scrollY 就卡在 0 了，拉不出负值，所以当「已经贴顶」
-     * 期间手指还在往下走时，累计位移到阈值就触发，触发后清零等下一次。
+     * 不能用 setOnTouchListener：气泡是可以长按选字的 TextView，会把 DOWN 吃掉，
+     * ViewGroup 只有在没有子 view 接手时才会把事件交给自己的 OnTouchListener。
+     * onInterceptTouchEvent 则是每次都能拿到，所以在这一层看手势。
      */
-    private void installPullToLoad() {
-        scroll.setOnTouchListener(new View.OnTouchListener() {
-            float downY;
+    private class PullScroll extends ScrollView {
+        private float downY;
+        private boolean armed;
 
-            @Override
-            public boolean onTouch(View v, android.view.MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case android.view.MotionEvent.ACTION_DOWN:
-                        downY = e.getY();
-                        pullAccum = 0;
-                        // 按下时就贴顶才备着，中途滚上去的不算
-                        pullArmed = hasMore && !loadingOlder && scroll.getScrollY() <= dp(4);
-                        break;
-                    case android.view.MotionEvent.ACTION_MOVE:
-                        if (!pullArmed) return false;
-                        if (scroll.getScrollY() > dp(4)) {
-                            pullArmed = false;
-                            return false;
-                        }
-                        // 只算往下拉（手指向下 = y 变大）
-                        float d = e.getY() - downY;
-                        if (d > 0) pullAccum = d;
-                        if (pullAccum > dp(PULL_TRIGGER_DP)) {
-                            pullArmed = false;
-                            pullAccum = 0;
-                            loadOlder();
-                        }
-                        break;
-                    case android.view.MotionEvent.ACTION_UP:
-                    case android.view.MotionEvent.ACTION_CANCEL:
-                        pullArmed = false;
-                        pullAccum = 0;
-                        break;
-                }
-                // 不吃事件：垂直滚动还得交给 ScrollView 自己
-                return false;
+        PullScroll(Context c) {
+            super(c);
+        }
+
+        @Override
+        public boolean onInterceptTouchEvent(android.view.MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    downY = e.getY();
+                    // 按下时就贴顶才备着，中途滚上去的不算
+                    armed = hasMore && !loadingOlder && getScrollY() <= dp(4);
+                    break;
+                case android.view.MotionEvent.ACTION_MOVE:
+                    if (armed && getScrollY() <= dp(4) && e.getY() - downY > dp(PULL_TRIGGER_DP)) {
+                        armed = false;
+                        loadOlder();
+                    }
+                    break;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    armed = false;
+                    break;
             }
-        });
+            return super.onInterceptTouchEvent(e);
+        }
     }
 
     /** 追加一条但不滚到底——重画历史时用，否则每加一条跳一次。 */
