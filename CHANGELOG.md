@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；`versionCode` 从 1.0 起每发一版递增 1（3.x 系列为 `versionCode = 21 + y`，4.x 为 `29 + x`，5.0 为 35，5.1 为 36，5.2 为 37，5.3 为 38，5.3.1 为 39，5.4 为 40；1.0.0.1 起 `versionCode = 10001`）。
 
+## [1.0.0.19] - 2026-11-11
+
+### 修复
+
+- **「下拉加载更早」几乎没用**：翻页原来固定要 6 条**事件记录**预算（`PAGE_MESSAGES=6`），但服务端 `paginate()` 数的是 `user/message` + `assistant/message` 两类事件，而一次工具调用就产生 `tool/call`、`job/registered`、`job/settled`、`tool/result`、`step/start`、`step/end`、`assistant/message(reasoning)` 七八条记录，客户端又只认「来源是用户的 user/message」「有正文的 assistant/message」「deliverables/presented」三种。实测同一会话 `maxMessages=6` 拉回 38 条记录、能显示的 0 条——所以点了半天也不出一条。
+
+### 变更
+
+- **翻页按「能显示几条」收工**：新增 `fetchHistory()`，一轮不够就接着拿 `minSeq` 往前翻，攒够才算完（首屏 24 条、翻页 12 条），最多 4 轮。`PAGE_MESSAGES` 6 → 200。
+- **HTTP 开 gzip**：`DshHttp` 请求带 `Accept-Encoding: gzip`，响应含 `Content-Encoding: gzip` 时解压（`gunzip()`，魔数 `1F 8B` 不符就原样返回）。同样 300 条历史不压 4.0MB、压完 1.0MB，翻页带宽降到四分之一。
+
+### 版本
+
+- `versionCode` 10018 → 10019，`versionName` `1.0.0.18` → `1.0.0.19`。
+
 ## [1.0.0.18] - 2026-11-10
 
 ### 新增
