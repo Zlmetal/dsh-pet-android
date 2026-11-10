@@ -146,7 +146,7 @@ public class MainActivity extends Activity {
 
         // 通知播报：任务跑完 / 出错 / 等确认时，除桌面气泡外再念一句、弹一条横幅
         LinearLayout rowVoice = row();
-        rowVoice.addView(label("语音播报状态", weightLp(1f)));
+        rowVoice.addView(label("语音播报状态"), weightLp(1f));
         voiceSwitch = new android.widget.Switch(this);
         voiceSwitch.setChecked(getSharedPreferences("pet", MODE_PRIVATE)
                 .getBoolean("voice_notify", true));
