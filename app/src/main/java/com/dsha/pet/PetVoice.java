@@ -122,8 +122,10 @@ final class PetVoice {
         stopClip();
         try {
             MediaPlayer mp = new MediaPlayer();
+            // 走媒体流：系统 TTS 默认就在媒体流上，换播放器不能把声音换到通知流去，
+            // 否则用户静音通知就听不见了（以前 TTS 是听得见的）。
             mp.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build());
             AssetFileDescriptor afd = openAsset(c, asset);
@@ -144,8 +146,10 @@ final class PetVoice {
             });
             mp.start();
             player = mp;
+            android.util.Log.i("PetVoice", "clip ok " + asset + " " + text);
             return true;
         } catch (Throwable t) {
+            android.util.Log.w("PetVoice", "clip fail " + asset + " " + t);
             stopClip();
             return false;
         }
@@ -207,6 +211,7 @@ final class PetVoice {
     // ------------------------------------------------------------------
 
     private void speakTts(Context c, String text) {
+        android.util.Log.i("PetVoice", "tts fallback " + text);
         ensure(c);
         if (failed) return;
         if (ready) utter(text);
