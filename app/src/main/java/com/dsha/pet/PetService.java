@@ -1329,7 +1329,8 @@ public class PetService extends Service {
             "桌面好安静，陪我玩会儿吧"
     };
 
-    private static final String[][] WORK_TEXTS = {
+    /** 包内可见：PetVoice 要按这张表把台词对上 assets/voice 里的内置音频。 */
+    static final String[][] WORK_TEXTS = {
             {"正在认真想下一步呢", "让我整理一下思路~", "正在梳理接下来要做什么"},
             {"正在处理任务呢", "这一步正在进行中哦", "正在继续干活呢，别打扰我~"},
             {"这一步处理好啦，接着看下一步", "搞定一步，继续看看哦~"},
@@ -1467,6 +1468,11 @@ public class PetService extends Service {
 
     /** 打开自带的对话界面（双击 / 菜单「对话」都走这里）。 */
     private void openChat() {
+        // 只看桌宠模式下不连 DSH，进去也只有一屏报错，直接挡住
+        if (!linkMode) {
+            showBubble("只看桌宠模式，没连 DSH 呢~", 2600);
+            return;
+        }
         if (chatOpen) {
             showBubble("已进对话，不要一直戳啦~", 2000);
             return;

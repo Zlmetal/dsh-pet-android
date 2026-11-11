@@ -1,29 +1,58 @@
 package com.dsha.pet;
 
 import android.content.Context;
+import android.content.res.AssetFileDescriptor;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Queue;
 
 /**
- * 用手机自带的 TTS 念工作状态台词。
+ * 念工作状态台词。
  *
- * 走系统引擎（Y700 上是 com.oplus.ttsaccessibilityengine），离线、不花流量、不用额
- * 外依赖。引擎的初始化是异步的，初始化没完就来的台词先排队，ready 之后一口气念出去。
+ * 主路径是**内置音频**：16 句台词事先用 NAS 上的 dsh-voice（sherpa-onnx / VITS，音色
+ * theresa）合成好，转成 22050Hz 单声道 vorbis，放在 assets/voice/ 里，一共 210KB 左右。
+ * 好处是音色固定、跟网页端一致、不依赖手机装没装中文 TTS 引擎，也不吃流量。
  *
- * 一台设备只留一个实例：TTS 引擎是系统级资源，反复 new 会互相抢焦点。
+ * 兜底路径是系统 TTS：台词表以后要是加了新句子（没对应音频），或者内置音频放不出来，
+ * 就退回 {@link TextToSpeech}，总比哑巴强。
+ *
+ * 一台设备只留一个播放器：MediaPlayer 反复 new 会互相抢音频焦点。
  */
 final class PetVoice {
 
     private static PetVoice inst;
 
+    /** 台词 → assets 里的音频路径。内容来自 PetService.WORK_TEXTS，组序与文件名一致。 */
+    private static final Map<String, String> CLIPS = buildClips();
+
+    private static Map<String, String> buildClips() {
+        Map<String, String> m = new HashMap<>();
+        String[][] texts = PetService.WORK_TEXTS;
+        for (int i = 0; i < texts.length; i++) {
+            for (int j = 0; j < texts[i].length; j++) {
+                m.put(texts[i][j], "voice/v" + i + "_" + j + ".ogg");
+            }
+        }
+        return m;
+    }
+
+    private MediaPlayer player;
+
     private TextToSpeech tts;
     private boolean ready = false;
     private boolean failed = false;
     private final Queue<String> queue = new ArrayDeque<>();
+
     private String lastText;
     private long lastAt;
 
@@ -35,9 +64,153 @@ final class PetVoice {
         return inst;
     }
 
-    /** 提前初始化，别等第一条台词到了才现开引擎（首句会延迟一两秒）。 */
+    /** 提前准备，别等第一条台词到了才现开（首句会延迟）。内置音频不用预热，只清 TTS 的失败态。 */
     void warm(Context c) {
-        ensure(c.getApplicationContext());
+        // 内置音频是现开现播的，冷启动也就几十毫秒，这里什么都不用做。
+    }
+
+    // ------------------------------------------------------------------
+    // 对外
+    // ------------------------------------------------------------------
+
+    /**
+     * 念一句。
+     *
+     * 同一句话 3 秒内不念第二遍——一轮任务结束时 tend 会连报两次状态，听两遍很吵。
+     */
+    void speak(Context c, String text) {
+        if (text == null || text.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (text.equals(lastText) && now - lastAt < 3000) return;
+        lastText = text;
+        lastAt = now;
+
+        String clip = CLIPS.get(text);
+        if (clip != null && playClip(c.getApplicationContext(), clip, text)) return;
+        speakTts(c.getApplicationContext(), text);
+    }
+
+    void stop() {
+        stopClip();
+        try {
+            if (tts != null) tts.stop();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    void release() {
+        ready = false;
+        queue.clear();
+        stopClip();
+        try {
+            if (tts != null) {
+                tts.stop();
+                tts.shutdown();
+            }
+        } catch (Throwable ignored) {
+        }
+        tts = null;
+        inst = null;
+    }
+
+    // ------------------------------------------------------------------
+    // 内置音频
+    // ------------------------------------------------------------------
+
+    /** 返回 true 表示已经交给播放器了；false 表示放不出来，调用方去走 TTS。 */
+    private boolean playClip(Context c, String asset, String text) {
+        stopClip();
+        try {
+            MediaPlayer mp = new MediaPlayer();
+            mp.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build());
+            AssetFileDescriptor afd = openAsset(c, asset);
+            try {
+                mp.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+                mp.prepare();
+            } finally {
+                try {
+                    afd.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            mp.setOnCompletionListener(p -> stopClip());
+            mp.setOnErrorListener((p, what, extra) -> {
+                stopClip();
+                speakTts(c, text);
+                return true;
+            });
+            mp.start();
+            player = mp;
+            return true;
+        } catch (Throwable t) {
+            stopClip();
+            return false;
+        }
+    }
+
+    /**
+     * 拿 assets 里音频的文件描述符。
+     *
+     * aapt 默认不压缩 .ogg，正常情况下直接 openFd 就行；万一哪天被压了（openFd 抛
+     * 「This file can not be opened as a file descriptor」），就落一份到 cache 再播。
+     */
+    private AssetFileDescriptor openAsset(Context c, String asset) throws Exception {
+        try {
+            return c.getAssets().openFd(asset);
+        } catch (java.io.IOException compressed) {
+            File dir = new File(c.getCacheDir(), "voice");
+            if (!dir.exists() && !dir.mkdirs()) throw compressed;
+            File f = new File(dir, asset.replace('/', '_'));
+            if (!f.exists() || f.length() == 0) {
+                File tmp = new File(f.getAbsolutePath() + ".tmp");
+                InputStream in = c.getAssets().open(asset);
+                try {
+                    FileOutputStream out = new FileOutputStream(tmp);
+                    try {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                        out.flush();
+                    } finally {
+                        out.close();
+                    }
+                } finally {
+                    in.close();
+                }
+                if (!tmp.renameTo(f)) throw compressed;
+            }
+            return new AssetFileDescriptor(
+                    android.os.ParcelFileDescriptor.open(f,
+                            android.os.ParcelFileDescriptor.MODE_READ_ONLY), 0, f.length());
+        }
+    }
+
+    private void stopClip() {
+        final MediaPlayer mp = player;
+        player = null;
+        if (mp == null) return;
+        try {
+            if (mp.isPlaying()) mp.stop();
+        } catch (Throwable ignored) {
+        }
+        try {
+            mp.release();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 系统 TTS（兜底）
+    // ------------------------------------------------------------------
+
+    private void speakTts(Context c, String text) {
+        ensure(c);
+        if (failed) return;
+        if (ready) utter(text);
+        else if (queue.size() < 4) queue.add(text);
     }
 
     private void ensure(Context c) {
@@ -87,50 +260,11 @@ final class PetVoice {
         }
     }
 
-    /**
-     * 念一句。
-     *
-     * 同一句话 3 秒内不念第二遍——一轮任务结束时 tend 会连报两次状态，听两遍很吵。
-     * 引擎没就绪就排队；彻底没引擎（failed）就当没这回事，不抛也不提示。
-     */
-    void speak(Context c, String text) {
-        if (text == null || text.isEmpty()) return;
-        ensure(c.getApplicationContext());
-        if (failed) return;
-        long now = System.currentTimeMillis();
-        if (text.equals(lastText) && now - lastAt < 3000) return;
-        lastText = text;
-        lastAt = now;
-        if (ready) utter(text);
-        else if (queue.size() < 4) queue.add(text);
-    }
-
     private void utter(String text) {
         try {
             // 打断上一条：攒着的旧状态念出来没意义，只念最新的
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "pet" + System.nanoTime());
         } catch (Throwable ignored) {
         }
-    }
-
-    void stop() {
-        try {
-            if (tts != null) tts.stop();
-        } catch (Throwable ignored) {
-        }
-    }
-
-    void release() {
-        ready = false;
-        queue.clear();
-        try {
-            if (tts != null) {
-                tts.stop();
-                tts.shutdown();
-            }
-        } catch (Throwable ignored) {
-        }
-        tts = null;
-        inst = null;
     }
 }

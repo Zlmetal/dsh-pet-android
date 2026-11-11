@@ -385,7 +385,16 @@ public class ChatActivity extends Activity {
             @Override
             public void run() {
                 final List<DshApi.SessionRow> got = new ArrayList<>();
+                // 归档集合单独问一次（session/list 不带这个信息）。拿不到就算了，
+                // 大不了列表里多几条已归档的，不能因为这个把整个列表打挂。
+                java.util.Set<String> archived = new LinkedHashSet<>();
+                DshApi.archivedIds(org, archived);
                 final DshApi.Result r = DshApi.list(org, got);
+                if (!archived.isEmpty()) {
+                    for (int i = got.size() - 1; i >= 0; i--) {
+                        if (archived.contains(got.get(i).id)) got.remove(i);
+                    }
+                }
                 ui.post(new Runnable() {
                     @Override
                     public void run() {

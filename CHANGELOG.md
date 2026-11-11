@@ -2,6 +2,25 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格；`versionCode` 从 1.0 起每发一版递增 1（3.x 系列为 `versionCode = 21 + y`，4.x 为 `29 + x`，5.0 为 35，5.1 为 36，5.2 为 37，5.3 为 38，5.3.1 为 39，5.4 为 40；1.0.0.1 起 `versionCode = 10001`）。
 
+## [1.0.0.21] - 2026-11-12
+
+### 新增
+
+- **语音播报改用 NAS 上 dsh-voice 合成的内置音频**，不再依赖手机系统 TTS。
+  - 16 句工作状态台词（`WORK_TEXTS` 六组）全部用 dsh-voice（sherpa-onnx / VITS，音色 theresa）预先合成，转成 22050Hz 单声道 vorbis 放在 `assets/voice/v{组}_{序}.ogg`，一共 208KB。
+  - 音色跟网页端一致，不挑手机有没有装中文 TTS 引擎，也不吃流量。
+  - 台词表以后要是加了新句子（没有对应音频），自动退回系统 TTS，不会哑巴。
+  - 内置音频放不出来（比如设备解不了 vorbis）也会当场回落到系统 TTS。
+
+### 修复
+
+- **会话列表不再显示已归档会话**。`session/list` 不返回归档标记，改用 `workspace/unarchiveSession` 当只读探针（对不存在的 id 幂等返回完整 `archivedSessionIds`），一次 RPC 拿到归档集合再过滤。探针失败时列表照常显示，不会因为拿不到归档信息就整页空掉。
+- **只看桌宠模式下双击不再跳对话**。原来双击直接开 `ChatActivity`，不连 DSH 时进去只有一屏报错；现在弹一句「只看桌宠模式，没连 DSH 呢~」就停住。菜单里的「对话」同样被挡住。
+
+### 版本
+
+- `versionCode` 10020 → 10021，`versionName` `1.0.0.20` → `1.0.0.21`。
+
 ## [1.0.0.20] - 2026-11-11
 
 ### 变更

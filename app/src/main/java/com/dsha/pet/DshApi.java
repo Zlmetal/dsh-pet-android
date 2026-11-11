@@ -156,6 +156,39 @@ public final class DshApi {
         return new Result(true, r.value, null);
     }
 
+    /**
+     * 拿归档会话的 id 集合。
+     *
+     * 服务端有坑：`session/list` 不返回归档标记，归档状态只在 workspace 域里，
+     * 而那个域唯一的读法是 `workspace/follow`——一个 stream Remote，必须开
+     * /api/remote.mux 的 WebSocket 才能用，为了一个 id 列表不值得。
+     *
+     * 好在 `workspace/unarchiveSession` 对**不存在的 id 幂等成功**，返回体里
+     * 还带着完整的 archivedSessionIds。所以拿一个假 id 去「取消归档」，实际
+     * 什么都不会变，纯粹当只读探针用。
+     *
+     * @return 探针成功与否；失败时 out 保持原样（调用方按「没有归档信息」处理）
+     */
+    public static boolean archivedIds(String origin, java.util.Set<String> out) {
+        JSONObject args = new JSONObject();
+        try {
+            JSONObject req = new JSONObject();
+            // 这个 id 故意不存在：取消归档一个不存在的会话是空操作
+            req.put("sessionId", "session-00000000-0000-0000-0000-000000000000");
+            args.put("request", req);
+        } catch (Exception ignored) {
+        }
+        Result r = call(origin, "workspace/unarchiveSession", args, 4000, 12000);
+        if (!r.ok) return false;
+        JSONArray arr = r.value.optJSONArray("archivedSessionIds");
+        if (arr == null) return false;
+        for (int i = 0; i < arr.length(); i++) {
+            String id = arr.optString(i, "");
+            if (!id.isEmpty()) out.add(id);
+        }
+        return true;
+    }
+
     // ------------------------------------------------------------------
     // 消息内容块
     // ------------------------------------------------------------------
